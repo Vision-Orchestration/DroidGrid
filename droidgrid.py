@@ -117,10 +117,17 @@ class Camera:
         self._last_hash    = b""
         self._same_count   = 0
 
-        # Writer queue (unbounded — writer thread drains it)
+        # Writer queue: items are (capture_timestamp, frame) tuples.
+        # Timestamps are used to measure the ACTUAL fps delivered by the camera
+        # before the VideoWriter is created, so the container fps always matches
+        # reality — even if the camera delivers fewer frames than the target
+        # (e.g. in low-light conditions where auto-exposure slows the sensor).
         self._write_q:  queue.Queue = queue.Queue(maxsize=0)
         self._writer:   Optional[cv2.VideoWriter] = None
         self._writer_th: Optional[threading.Thread] = None
+
+        # Recording timer — set when recording starts, cleared on stop
+        self.rec_start_time: Optional[float] = None
 
         self._cap: Optional[cv2.VideoCapture] = None
 
@@ -238,7 +245,7 @@ class Camera:
             # ── push to writer queue ───────────────────────────────────────
             if self.recording:
                 try:
-                    self._write_q.put_nowait(frame)
+                    self._write_q.put_nowait((time.time(), frame))
                 except queue.Full:
                     pass   # drop rather than block
 
@@ -263,15 +270,12 @@ class Camera:
     def start_recording(self, filepath: str) -> bool:
         if self.recording:
             return False
-        w, h = self.res
-        fourcc = cv2.VideoWriter_fourcc(*CODEC)
-        writer = cv2.VideoWriter(filepath, fourcc, float(self.fps), (w, h))
-        if not writer.isOpened():
-            writer.release()
-            self._log.error("VideoWriter failed: %s", filepath)
-            return False
-        self._writer = writer
+        # VideoWriter is created lazily inside _writer_loop once we know
+        # the actual fps the camera is delivering.  Store the path for later.
+        self._pending_filepath = filepath
+        self._writer = None
         self.recording = True
+        self.rec_start_time = time.time()
         self._writer_th = threading.Thread(
             target=self._writer_loop, daemon=True, name=f"wr-{self.name}")
         self._writer_th.start()
@@ -282,13 +286,48 @@ class Camera:
         if not self.recording:
             return
         self.recording = False
+        self.rec_start_time = None
         self._write_q.put(None)   # sentinel
         if self._writer_th:
             self._writer_th.join(timeout=5.0)
         self._log.info("Recording stopped  (queued frames flushed)")
 
     def _writer_loop(self):
-        """Drain the write queue into the VideoWriter — runs in its own thread."""
+        """
+        Drain the write queue into a VideoWriter.
+
+        The VideoWriter is created AFTER collecting WARMUP_FRAMES frames so
+        that its declared fps matches the camera's actual delivery rate.
+        This prevents sped-up playback when the camera cannot hit the target
+        fps (e.g. in dark environments where auto-exposure lengthens exposure).
+        """
+        WARMUP_FRAMES = 20   # collect this many frames before measuring fps
+
+        pending: list = []   # (timestamp, frame) buffer during warmup
+
+        def _flush_pending(actual_fps: float):
+            """Create VideoWriter and write all buffered frames."""
+            w, h = self.res
+            fourcc = cv2.VideoWriter_fourcc(*CODEC)
+            writer = cv2.VideoWriter(
+                self._pending_filepath, fourcc, actual_fps, (w, h))
+            if not writer.isOpened():
+                writer.release()
+                self._log.error("VideoWriter failed: %s", self._pending_filepath)
+                return None
+            self._log.info(
+                "VideoWriter created  fps=%.2f  (target %d)", actual_fps, self.fps)
+            for _, f in pending:
+                _write_one(writer, f, w, h)
+            return writer
+
+        def _write_one(writer, frame, w, h):
+            f = frame if (frame.shape[1] == w and frame.shape[0] == h) \
+                else cv2.resize(frame, (w, h))
+            writer.write(f)
+
+        writer = None
+
         while True:
             try:
                 item = self._write_q.get(timeout=1.0)
@@ -296,16 +335,47 @@ class Camera:
                 if not self.recording:
                     break
                 continue
-            if item is None:
+
+            if item is None:   # sentinel — stop requested
                 break
-            w, h = self.res
-            frame = item if (item.shape[1] == w and item.shape[0] == h) \
-                    else cv2.resize(item, (w, h))
-            self._writer.write(frame)
-        if self._writer:
-            self._writer.release()
-            self._writer = None
-        # drain any leftover items
+
+            ts, frame = item
+
+            if writer is None:
+                # Still in warmup: buffer frames
+                pending.append((ts, frame))
+
+                if len(pending) >= WARMUP_FRAMES:
+                    # Measure fps from timestamps of collected frames
+                    elapsed = pending[-1][0] - pending[0][0]
+                    if elapsed > 0.05:
+                        actual_fps = (len(pending) - 1) / elapsed
+                    else:
+                        actual_fps = float(self.fps)   # fallback: too fast to measure
+                    actual_fps = max(1.0, min(actual_fps, 60.0))
+                    writer = _flush_pending(actual_fps)
+                    pending.clear()
+            else:
+                # Normal write path
+                w, h = self.res
+                _write_one(writer, frame, w, h)
+
+        # Flush any frames still in the warmup buffer (short recording)
+        if pending:
+            elapsed = pending[-1][0] - pending[0][0] if len(pending) > 1 else 0
+            if elapsed > 0.05:
+                actual_fps = (len(pending) - 1) / elapsed
+            else:
+                actual_fps = self.live_fps if self.live_fps > 0.5 else float(self.fps)
+            actual_fps = max(1.0, min(actual_fps, 60.0))
+            writer = _flush_pending(actual_fps)
+            pending.clear()
+
+        if writer:
+            writer.release()
+        self._writer = None
+
+        # Drain any remaining items the capture thread may have queued
         while not self._write_q.empty():
             try:
                 self._write_q.get_nowait()
@@ -393,63 +463,137 @@ def _draw_cell_hud(cell: np.ndarray, cam: Camera, recording: bool) -> np.ndarray
     h, w = cell.shape[:2]
     out = cell.copy()
 
-    # semi-transparent top bar
-    bar = out[0:30, :].copy()
-    cv2.rectangle(out, (0, 0), (w, 30), (0, 0, 0), -1)
-    cv2.addWeighted(out[0:30], 0.55, bar, 0.45, 0, out[0:30])
+    # ── semi-transparent top bar ────────────────────────────────────────────
+    roi = out[0:32, :]
+    dark = roi.copy()
+    cv2.rectangle(dark, (0, 0), (w, 32), (0, 0, 0), -1)
+    cv2.addWeighted(dark, 0.60, roi, 0.40, 0, roi)
+    out[0:32, :] = roi
 
-    # camera name
-    cv2.putText(out, cam.name, (8, 21), _FONT, 0.58, (255, 255, 255), 1, cv2.LINE_AA)
+    # camera name (left)
+    cv2.putText(out, cam.name, (8, 22), _FONT, 0.58, (255, 255, 255), 1, cv2.LINE_AA)
 
-    # connection status + FPS
+    # connection status + FPS (right)
     if cam.connected:
-        status_col = (80, 220, 80)
-        status_txt = f"LIVE  {cam.live_fps:4.1f} fps"
+        fps_ratio = cam.live_fps / cam.fps if cam.fps > 0 else 1.0
+        if fps_ratio >= 0.85:
+            status_col = (80, 220, 80)       # green  — good
+        elif fps_ratio >= 0.55:
+            status_col = (40, 190, 230)      # amber  — below target but ok
+        else:
+            status_col = (60, 100, 240)      # red-ish — significantly low
+        status_txt = f"LIVE  {cam.live_fps:4.1f}/{cam.fps}fps"
     else:
         status_col = (60, 60, 200)
         status_txt = "OFFLINE"
-    cv2.putText(out, status_txt, (w - 160, 21), _FONT, 0.52, status_col, 1, cv2.LINE_AA)
+    tw = cv2.getTextSize(status_txt, _FONT, 0.50, 1)[0][0]
+    cv2.putText(out, status_txt, (w - tw - 8, 22), _FONT, 0.50, status_col, 1, cv2.LINE_AA)
 
-    # REC badge
+    # ── REC badge (top-right, below the status bar) ─────────────────────────
     if recording and cam.recording:
-        cv2.rectangle(out, (0, 0), (w, h), (0, 0, 180), 3)
-        cv2.rectangle(out, (w - 68, 36), (w - 4, 58), (0, 0, 0), -1)
-        cv2.circle(out, (w - 56, 47), 7, (0, 0, 230), -1)
-        cv2.putText(out, "REC", (w - 46, 52), _FONT, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
+        # red border around the cell
+        cv2.rectangle(out, (0, 0), (w, h), (30, 30, 200), 3)
+        # blinking dot + REC label
+        blink_on = int(time.time() * 2) % 2 == 0
+        badge_x, badge_y = w - 64, 38
+        cv2.rectangle(out, (badge_x - 4, badge_y - 14),
+                      (w - 2, badge_y + 6), (0, 0, 0), -1)
+        dot_col = (0, 0, 230) if blink_on else (60, 60, 140)
+        cv2.circle(out, (badge_x + 6, badge_y - 4), 6, dot_col, -1)
+        cv2.putText(out, "REC", (badge_x + 16, badge_y + 4),
+                    _FONT, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
 
-    # frame counter (bottom-left)
+        # per-camera elapsed timer (bottom-right)
+        if cam.rec_start_time is not None:
+            elapsed = int(time.time() - cam.rec_start_time)
+            mm, ss = divmod(elapsed, 60)
+            timer_txt = f"{mm:02d}:{ss:02d}"
+            ttw = cv2.getTextSize(timer_txt, _MONO, 0.52, 1)[0][0]
+            cv2.putText(out, timer_txt, (w - ttw - 8, h - 8),
+                        _MONO, 0.52, (120, 120, 230), 1, cv2.LINE_AA)
+
+    # ── frame counter (bottom-left) ─────────────────────────────────────────
     cv2.putText(out, f"#{cam.frame_count}", (8, h - 8),
-                _FONT, 0.40, (160, 160, 160), 1, cv2.LINE_AA)
+                _FONT, 0.38, (110, 110, 110), 1, cv2.LINE_AA)
 
-    # drop counter
+    # drop warning
     if cam.drop_count > 0:
-        cv2.putText(out, f"drop:{cam.drop_count}", (w - 100, h - 8),
-                    _FONT, 0.40, (80, 80, 220), 1, cv2.LINE_AA)
+        dw = cv2.getTextSize(f"drop:{cam.drop_count}", _FONT, 0.38, 1)[0][0]
+        cv2.putText(out, f"drop:{cam.drop_count}",
+                    (w - dw - 8 if not (recording and cam.recording) else w // 2 - dw // 2,
+                     h - 8),
+                    _FONT, 0.38, (60, 80, 220), 1, cv2.LINE_AA)
 
     return out
 
 
 def _draw_top_bar(grid: np.ndarray, sess: Session,
-                  recording: bool, status: str, hud: bool) -> np.ndarray:
-    bar_h = 54
+                  recording: bool, status: str, hud: bool,
+                  rec_start_time: Optional[float] = None) -> np.ndarray:
+    bar_h = 58
     bar = np.zeros((bar_h, grid.shape[1], 3), dtype=np.uint8)
-    bg = (28, 4, 4) if recording else (18, 18, 18)
+    W = grid.shape[1]
+
+    # background — slightly red tint when recording
+    bg = (32, 6, 6) if recording else (18, 18, 22)
     bar[:] = bg
 
-    # status line
-    status_col = (100, 180, 255) if not recording else (80, 80, 255)
-    cv2.putText(bar, status, (12, 22), _FONT, 0.58, status_col, 1, cv2.LINE_AA)
+    # thin accent line at bottom of bar
+    accent = (80, 40, 40) if recording else (40, 40, 60)
+    cv2.line(bar, (0, bar_h - 1), (W, bar_h - 1), accent, 1)
 
-    # session meta
-    meta = (f"Label: {sess.label}   Person: {sess.person}   "
-            f"Repeat: {sess.repeat}   HUD: {'ON' if hud else 'OFF'}")
-    cv2.putText(bar, meta, (12, 46), _FONT, 0.41, (140, 160, 180), 1, cv2.LINE_AA)
+    if recording and rec_start_time is not None:
+        # ── recording layout ────────────────────────────────────────────────
+        elapsed  = int(time.time() - rec_start_time)
+        mm, ss   = divmod(elapsed, 60)
+        hh, mm   = divmod(mm, 60)
+        if hh > 0:
+            timer_txt = f"{hh:02d}:{mm:02d}:{ss:02d}"
+        else:
+            timer_txt = f"{mm:02d}:{ss:02d}"
 
-    # controls hint (right side)
+        # blinking red dot
+        blink_on = int(time.time() * 2) % 2 == 0
+        dot_col  = (50, 50, 220) if blink_on else (30, 30, 100)
+        cv2.circle(bar, (18, 20), 7, dot_col, -1)
+
+        # REC label
+        cv2.putText(bar, "REC", (32, 26), _FONT, 0.62,
+                    (200, 200, 255), 1, cv2.LINE_AA)
+
+        # timer — large and prominent
+        tw = cv2.getTextSize(timer_txt, _MONO, 0.75, 2)[0][0]
+        cv2.putText(bar, timer_txt, (W // 2 - tw // 2, 30),
+                    _MONO, 0.75, (180, 180, 255), 2, cv2.LINE_AA)
+
+        # session info below timer
+        meta = f"{sess.label}  ·  {sess.person}  ·  {sess.repeat}"
+        mw = cv2.getTextSize(meta, _FONT, 0.40, 1)[0][0]
+        cv2.putText(bar, meta, (W // 2 - mw // 2, 50),
+                    _FONT, 0.40, (140, 120, 120), 1, cv2.LINE_AA)
+
+        # status right-aligned
+        sw = cv2.getTextSize(status, _FONT, 0.44, 1)[0][0]
+        cv2.putText(bar, status, (W - sw - 10, 22),
+                    _FONT, 0.44, (120, 120, 180), 1, cv2.LINE_AA)
+
+    else:
+        # ── idle layout ─────────────────────────────────────────────────────
+        # status (top line)
+        cv2.putText(bar, status, (12, 22), _FONT, 0.56,
+                    (100, 180, 255), 1, cv2.LINE_AA)
+
+        # session meta (second line)
+        meta = (f"Label: {sess.label}   Person: {sess.person}   "
+                f"Repeat: {sess.repeat}   HUD: {'ON' if hud else 'OFF'}")
+        cv2.putText(bar, meta, (12, 46), _FONT, 0.40,
+                    (140, 160, 180), 1, cv2.LINE_AA)
+
+    # controls hint — always bottom-right
     hint = "R:Rec  S:Stop  T:Snap  G/P/N:Label  C:Reconnect  H:HUD  Q:Quit"
-    tw = cv2.getTextSize(hint, _FONT, 0.37, 1)[0][0]
-    cv2.putText(bar, hint, (grid.shape[1] - tw - 10, 46),
-                _FONT, 0.37, (90, 90, 90), 1, cv2.LINE_AA)
+    tw = cv2.getTextSize(hint, _FONT, 0.36, 1)[0][0]
+    cv2.putText(bar, hint, (W - tw - 10, 46 if not recording else 46),
+                _FONT, 0.36, (65, 65, 65), 1, cv2.LINE_AA)
 
     return np.vstack([bar, grid])
 
@@ -524,6 +668,7 @@ class DroidGrid:
         self.hud       = True
         self._status   = "Ready — press R to start recording"
         self._prompt: Optional[InlinePrompt] = None   # active inline prompt
+        self._rec_start_time: Optional[float] = None  # wall-clock start of recording
 
         os.makedirs(RECORD_DIR,   exist_ok=True)
         os.makedirs(SNAPSHOT_DIR, exist_ok=True)
@@ -568,6 +713,7 @@ class DroidGrid:
             self._status = "No cameras available to record"
             return
         self.recording = True
+        self._rec_start_time = time.time()
         self._status = (f"● REC  {self.session.label} / {self.session.person} / "
                         f"{self.session.repeat}  — {started} cameras")
         log.info("Recording started  (%d cameras)", started)
@@ -579,6 +725,7 @@ class DroidGrid:
         for cam in self.cameras:
             cam.stop_recording()
         self.recording = False
+        self._rec_start_time = None
         self._status = f"Saved to {RECORD_DIR}/"
         log.info("Recording stopped")
         self.session.auto_next_repeat()
@@ -620,7 +767,8 @@ class DroidGrid:
             for r in range(rows)
         ]
         grid = np.vstack(rows_imgs)
-        grid = _draw_top_bar(grid, self.session, self.recording, self._status, self.hud)
+        grid = _draw_top_bar(grid, self.session, self.recording,
+                             self._status, self.hud, self._rec_start_time)
         return grid
 
     # ── main loop ──────────────────────────────────────────────────────────
