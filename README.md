@@ -65,7 +65,7 @@ pip install opencv-python numpy
 
 ### 1. Clone
 ```bash
-git clone https://github.com/luuucciiffeerr/DroidGrid.git
+git clone https://github.com/Vision-Orchestration/DroidGrid.git
 cd DroidGrid
 pip install -r requirements.txt
 ```
