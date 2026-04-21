@@ -710,7 +710,7 @@ def _print_banner():
   ██║  ██║██╔══██╗██║   ██║██║██║  ██║██║   ██║██╔══██╗██║██║  ██║
   ██████╔╝██║  ██║╚██████╔╝██║██████╔╝╚██████╔╝██║  ██║██║██████╔╝
   ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝╚═════╝
-  Multi-Phone DroidCam Controller — github.com/your-username/droidgrid
+  Multi-Phone DroidCam Controller — github.com/luuucciiffeerr/droidgrid
 """)
 
 
