@@ -224,8 +224,14 @@ class Camera:
                 self._fps_counter = 0
                 self._fps_ts = now
 
-            # ── store display frame (resized) ──────────────────────────────
-            disp = cv2.resize(frame, (CELL_W, CELL_H), interpolation=cv2.INTER_LINEAR)
+            # ── store display frame (high-quality preview resize) ───────────
+            fh, fw = frame.shape[:2]
+            if (fw, fh) == (CELL_W, CELL_H):
+                disp = frame.copy()
+            else:
+                # Use better interpolation than linear to avoid a soft/blurry preview.
+                interp = cv2.INTER_AREA if fw >= CELL_W and fh >= CELL_H else cv2.INTER_CUBIC
+                disp = cv2.resize(frame, (CELL_W, CELL_H), interpolation=interp)
             with self._frame_lock:
                 self._display_frame = disp
 
