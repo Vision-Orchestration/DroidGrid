@@ -1,0 +1,68 @@
+# MediaMTX Configuration — DroidGrid Stream Broker
+# Replaces direct MJPEG polling with a central RTSP/WebRTC/HLS broker.
+logLevel: info
+logDestinations: [stdout]
+
+rtspAddress: :8554
+rtmpAddress: :1935
+hlsAddress: :8888
+webrtcAddress: :8889
+
+# WebRTC configuration
+webrtcICEServers2:
+  - url: stun:stun.l.google.com:19302
+webrtcIPsFromInterfaces: yes
+
+# API for programmatic control
+api: yes
+apiAddress: :9997
+
+paths:
+  # DroidCam phone streams — replace IPs with your phone IPs
+  phone1:
+    source: http://192.168.137.101:4747/mjpegfeed?1280x720
+    sourceOnDemand: no
+    record: yes
+    recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+    recordFormat: mp4
+    recordPartDuration: 5m
+    recordDeleteAfter: 0
+
+  phone2:
+    source: http://192.168.137.102:4747/mjpegfeed?1280x720
+    sourceOnDemand: no
+    record: yes
+    recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+    recordFormat: mp4
+    recordPartDuration: 5m
+
+  phone3:
+    source: http://192.168.137.103:4747/mjpegfeed?1280x720
+    sourceOnDemand: no
+    record: yes
+    recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+    recordFormat: mp4
+    recordPartDuration: 5m
+
+  phone4:
+    source: http://192.168.137.104:4747/mjpegfeed?1280x720
+    sourceOnDemand: no
+    record: yes
+    recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+    recordFormat: mp4
+    recordPartDuration: 5m
+
+  phone5:
+    source: http://192.168.137.105:4747/mjpegfeed?1280x720
+    sourceOnDemand: no
+    record: yes
+    recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+    recordFormat: mp4
+    recordPartDuration: 5m
+
+  # ONVIF / RTSP IP cameras can be added here natively
+  # ipcam-1:
+  #   source: rtsp://admin:password@192.168.1.200:554/stream1
+  #   sourceOnDemand: no
+  #   record: yes
+  #   recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f

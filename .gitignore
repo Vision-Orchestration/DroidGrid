@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+dist/
+release/
+
+# Output — never commit recorded data
+recordings/
+snapshots/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Packages
+*.zip
+*.7z
+
+# Backups — do not commit backup copies of files
+.backups/
+
+# Nested repos
+droidgrid cli/
