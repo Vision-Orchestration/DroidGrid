@@ -399,7 +399,7 @@ class DroidGridLauncher:
 
         self._build_cameras_section(left)
         self._build_session_section(left)
-        self._build_profiles_panel(right)
+        self._build_right_panel(right)
 
         # ── status bar ───────────────────────────────────────────────────────
         tk.Frame(root, bg=BORDER, height=1).pack(fill=tk.X)
@@ -594,17 +594,20 @@ class DroidGridLauncher:
 
     # ── profiles panel ───────────────────────────────────────────────────────
 
-    def _build_profiles_panel(self, parent):
+    def _build_right_panel(self, parent):
         tk.Frame(parent, bg=BORDER, width=1).pack(side=tk.LEFT, fill=tk.Y)
 
-        inner = tk.Frame(parent, bg=BG2, padx=14)
-        inner.pack(fill=tk.BOTH, expand=True)
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill=tk.BOTH, expand=True)
 
-        tk.Label(inner, text="📁  Profiles",
-                 bg=BG2, fg=FG, font=FONT_HEAD).pack(anchor=tk.W, pady=(16, 10))
+        # ── Tab 1: Profiles ──────────────────────────────────────────────────
+        tab_profiles = tk.Frame(notebook, bg=BG2, padx=14)
+        notebook.add(tab_profiles, text="  Profiles  ")
 
-        # profile listbox
-        lb_frame = tk.Frame(inner, bg=BG2)
+        tk.Label(tab_profiles, text="📁  Profiles",
+                 bg=BG2, fg=FG, font=FONT_HEAD).pack(anchor=tk.W, pady=(12, 8))
+
+        lb_frame = tk.Frame(tab_profiles, bg=BG2)
         lb_frame.pack(fill=tk.BOTH, expand=True)
 
         sb = ttk.Scrollbar(lb_frame, orient=tk.VERTICAL)
@@ -614,8 +617,7 @@ class DroidGridLauncher:
             relief=tk.FLAT, font=FONT_BODY,
             activestyle=tk.NONE,
             yscrollcommand=sb.set,
-            highlightthickness=1,
-            highlightcolor=BORDER,
+            highlightthickness=1, highlightcolor=BORDER,
             highlightbackground=BORDER,
         )
         sb.config(command=self._profile_lb.yview)
@@ -624,58 +626,125 @@ class DroidGridLauncher:
         self._profile_lb.bind("<<ListboxSelect>>", self._on_profile_select)
         self._profile_lb.bind("<Double-Button-1>", lambda e: self._load_profile())
 
-        # profile buttons
         btn_cfg = {"bg": BG3, "fg": FG, "activebackground": BORDER,
                    "activeforeground": FG, "relief": tk.FLAT,
                    "cursor": "hand2", "font": FONT_SMALL}
-        btn_row1 = tk.Frame(inner, bg=BG2)
-        btn_row1.pack(fill=tk.X, pady=(8, 0))
+        btn_row1 = tk.Frame(tab_profiles, bg=BG2)
+        btn_row1.pack(fill=tk.X, pady=(6, 0))
         tk.Button(btn_row1, text="Load", **btn_cfg,
                   command=self._load_profile).pack(side=tk.LEFT, fill=tk.X,
-                                                    expand=True, padx=(0, 2), ipady=4)
+                                                    expand=True, padx=(0, 2), ipady=3)
         tk.Button(btn_row1, text="Save As…", **btn_cfg,
                   command=self._save_profile).pack(side=tk.LEFT, fill=tk.X,
-                                                    expand=True, padx=(2, 0), ipady=4)
-
-        btn_row2 = tk.Frame(inner, bg=BG2)
-        btn_row2.pack(fill=tk.X, pady=(4, 0))
+                                                    expand=True, padx=(2, 0), ipady=3)
+        btn_row2 = tk.Frame(tab_profiles, bg=BG2)
+        btn_row2.pack(fill=tk.X, pady=(3, 0))
         tk.Button(btn_row2, text="Rename…", **btn_cfg,
                   command=self._rename_profile).pack(side=tk.LEFT, fill=tk.X,
-                                                      expand=True, padx=(0, 2), ipady=4)
+                                                      expand=True, padx=(0, 2), ipady=3)
         tk.Button(btn_row2, text="Delete", bg=BG3, fg=DANGER,
                   activebackground=BORDER, activeforeground=DANGER,
                   relief=tk.FLAT, cursor="hand2", font=FONT_SMALL,
                   command=self._delete_profile).pack(side=tk.LEFT, fill=tk.X,
-                                                      expand=True, padx=(2, 0), ipady=4)
-
-        # quick-save current button
-        tk.Button(inner, text="💾  Quick Save Current Profile",
-                  bg=BG3, fg=ACCENT,
+                                                      expand=True, padx=(2, 0), ipady=3)
+        tk.Button(tab_profiles, text="💾  Quick Save", bg=BG3, fg=ACCENT,
                   activebackground=BORDER, activeforeground=ACCENT,
                   relief=tk.FLAT, cursor="hand2", font=FONT_SMALL,
-                  command=self._quick_save
-                  ).pack(fill=tk.X, pady=(8, 0), ipady=5)
-
-        # separator
-        tk.Frame(inner, bg=BORDER, height=1).pack(fill=tk.X, pady=14)
-
-        # help text
-        help_lines = [
-            "Quick tips:",
-            "• Double-click profile to load",
-            "• Press Test to check cameras",
-            "• Press ▶ Launch to start",
-            "",
-            "Profiles saved to:",
-            "~/.droidgrid/profiles.json",
-        ]
-        for line in help_lines:
-            tk.Label(inner, text=line, bg=BG2,
-                     fg=FG3 if not line.startswith("~") else ACCENT,
-                     font=FONT_SMALL, anchor=tk.W,
-                     justify=tk.LEFT).pack(anchor=tk.W)
+                  command=self._quick_save).pack(fill=tk.X, pady=(6, 0), ipady=4)
 
         self._refresh_profile_list()
+
+        # ── Tab 2: Addons ────────────────────────────────────────────────────
+        tab_addons = tk.Frame(notebook, bg=BG2, padx=14)
+        notebook.add(tab_addons, text="  Addons  ")
+        self._build_addons_panel(tab_addons)
+
+    def _build_addons_panel(self, parent):
+        tk.Label(parent, text="🧩  Addons",
+                 bg=BG2, fg=FG, font=FONT_HEAD).pack(anchor=tk.W, pady=(12, 8))
+
+        # scan addons directory
+        addons_root = Path(__file__).resolve().parent.parent / "addons"
+        found = []
+        if addons_root.exists():
+            for d in sorted(addons_root.iterdir()):
+                if d.is_dir():
+                    manifest_path = d / "addon.json"
+                    if manifest_path.exists():
+                        try:
+                            manifest = json.loads(manifest_path.read_text())
+                            found.append(manifest)
+                        except Exception:
+                            found.append({"id": d.name, "name": d.name,
+                                          "version": "?", "description": "Invalid manifest"})
+
+        if not found:
+            tk.Label(parent, text="No addons found", bg=BG2, fg=FG3,
+                     font=FONT_SMALL).pack(anchor=tk.W, pady=10)
+            tk.Label(parent, text="Add addon directories to:", bg=BG2,
+                     fg=FG3, font=FONT_SMALL).pack(anchor=tk.W)
+            tk.Label(parent, text=str(addons_root), bg=BG2,
+                     fg=ACCENT, font=FONT_SMALL).pack(anchor=tk.W)
+            return
+
+        # addon list
+        lb_frame = tk.Frame(parent, bg=BG2)
+        lb_frame.pack(fill=tk.BOTH, expand=True)
+
+        self._addon_lb = tk.Listbox(
+            lb_frame, bg=BG3, fg=FG,
+            selectbackground=ACCENT, selectforeground="#fff",
+            relief=tk.FLAT, font=FONT_BODY,
+            activestyle=tk.NONE,
+            highlightthickness=1, highlightcolor=BORDER,
+            highlightbackground=BORDER,
+        )
+        self._addon_lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._addon_data = found
+        for a in found:
+            desc = a.get("description", "")[:40]
+            label = f"  {a['name']}  v{a.get('version','?')}"
+            self._addon_lb.insert(tk.END, label)
+
+        # addon detail area
+        self._addon_detail_var = tk.StringVar(value="Select an addon for details")
+        tk.Label(parent, textvariable=self._addon_detail_var,
+                 bg=BG2, fg=FG2, font=FONT_SMALL,
+                 wraplength=200, justify=tk.LEFT, anchor=tk.W).pack(
+                     anchor=tk.W, fill=tk.X, pady=(6, 0))
+
+        self._addon_lb.bind("<<ListboxSelect>>", self._on_addon_select)
+
+        # footer
+        tk.Frame(parent, bg=BORDER, height=1).pack(fill=tk.X, pady=8)
+
+        help_lines = [
+            "Addons extend DroidGrid with",
+            "custom capabilities.",
+            "Manage addons in the Pro",
+            "web UI (Extensions tab).",
+        ]
+        for line in help_lines:
+            tk.Label(parent, text=line, bg=BG2,
+                     fg=FG3, font=FONT_SMALL,
+                     anchor=tk.W).pack(anchor=tk.W)
+
+    def _on_addon_select(self, event=None):
+        sel = self._addon_lb.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx < len(self._addon_data):
+            a = self._addon_data[idx]
+            desc = a.get("description", "No description available.")
+            lines = [f"Name: {a['name']}",
+                     f"ID:   {a.get('id', '?')}",
+                     f"Ver:  {a.get('version', '?')}",
+                     f"Auth: {a.get('author', '?')}",
+                     f"",
+                     f"{desc}"]
+            self._addon_detail_var.set("\n".join(lines))
 
     def _refresh_profile_list(self):
         self._profile_lb.delete(0, tk.END)
