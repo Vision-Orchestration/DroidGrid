@@ -1,0 +1,97 @@
+# DroidGrid VNF Stack — ETSI NFV-style deployment
+# Each service is an independently restartable Virtual Network Function.
+version: "3.9"
+
+services:
+  # VNF-1: Stream Broker
+  vnf-ingest:
+    image: bluenviron/mediamtx:latest
+    container_name: droidgrid-ingest
+    network_mode: host
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+      - ./recordings:/recordings
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9997/v3/paths/list"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:   { cpus: "1.0",  memory: "256M" }
+        reservations: { cpus: "0.2", memory: "64M" }
+
+  # VNF-2: Decoder / Inference Engine (Python + optional GPU)
+  vnf-decoder:
+    image: python:3.11-slim
+    container_name: droidgrid-decoder
+    network_mode: host
+    volumes:
+      - ./addons:/addons:ro
+      - ./models:/models:ro
+    environment:
+      - MEDIAMTX_URL=rtsp://localhost:8554
+    command: >
+      sh -c "pip install -q opencv-python numpy onnxruntime mediapipe &&
+             python /addons/fern-inference/inference.py
+             --model /models/fern_v2.onnx
+             --mediapipe /models/pose_landmarker_heavy.task
+             --rtsp_url rtsp://localhost:8554/phone1"
+    restart: unless-stopped
+    depends_on:
+      vnf-ingest:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:   { cpus: "4.0",  memory: "3G" }
+        reservations: { cpus: "0.1", memory: "512M" }
+
+  # VNF-3: API / Control Plane
+  vnf-api:
+    build:
+      context: ./DroidGrid Pro
+      dockerfile: Dockerfile.api
+    container_name: droidgrid-api
+    ports: ["3000:3000"]
+    volumes:
+      - ~/.droidgrid:/data
+      - ./recordings:/recordings:ro
+    environment:
+      - DATA_DIR=/data
+      - MEDIAMTX_API=http://localhost:9997
+      - NODE_ENV=production
+    restart: unless-stopped
+    depends_on:
+      vnf-ingest:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:   { cpus: "1.0",  memory: "512M" }
+        reservations: { cpus: "0.1", memory: "128M" }
+
+  # VNF-4: Web UI
+  vnf-ui:
+    build:
+      context: ./DroidGrid Pro
+      dockerfile: Dockerfile.ui
+    container_name: droidgrid-ui
+    ports: ["80:80"]
+    restart: unless-stopped
+    depends_on:
+      vnf-api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:   { cpus: "0.5",  memory: "256M" }
+        reservations: { cpus: "0.05", memory: "64M" }
+
+networks:
+  default:
+    driver: bridge

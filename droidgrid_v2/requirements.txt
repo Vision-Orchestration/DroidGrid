@@ -1,0 +1,4 @@
+# DroidGrid dependencies
+# tkinter is included in the Python standard library (no install needed)
+opencv-python>=4.8.0
+numpy>=1.24.0

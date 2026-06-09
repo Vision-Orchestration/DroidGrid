@@ -4,14 +4,11 @@ __pycache__/
 *.pyo
 .Python
 *.egg-info/
+dist/
+build/
 .venv/
 venv/
 env/
-
-# Node
-node_modules/
-dist/
-release/
 
 # Output — never commit recorded data
 recordings/
@@ -24,13 +21,3 @@ snapshots/
 # OS
 .DS_Store
 Thumbs.db
-
-# Packages
-*.zip
-*.7z
-
-# Backups — do not commit backup copies of files
-.backups/
-
-# Nested repos
-droidgrid cli/
