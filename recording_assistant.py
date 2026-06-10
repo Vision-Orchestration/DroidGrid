@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
 """
-recording_assistant.py — FERN v2 Guided Recording Assistant
+recording_assistant.py — FERN v2 Guided Recording Assistant  v1.2.0
+=====================================================================
+Guides gesture recording sessions with countdown, GO/REST signals,
+auto-generated label JSONs per camera, and DroidGrid REST integration.
 
-Auto-guides gesture recording sessions with countdown, GO/REST signals,
-auto-generated label JSONs, and optional DroidGrid REST integration.
+SYNC CONTRACT
+─────────────
+The label JSON frame numbers are computed from wall-clock time
+relative to the moment DroidGrid confirms recording has started.
+A configurable `sync_delay_sec` is inserted between the DroidGrid
+start-confirm and the first tracker frame, giving MediaMTX time
+to flush its buffer and write the actual first frame.
+
+Label JSON segments use BOTH frame counts AND wall-clock seconds
+so downstream tools can re-anchor to actual FPS if it differs
+from the nominal rate.
 
 Usage:
-    python src/recording_assistant.py
-    python src/recording_assistant.py --subject p12 --output_dir data/new_recordings
-    python src/recording_assistant.py --subject p12 --no_droidgrid
-    python src/recording_assistant.py --list_gestures
-
-Requirements: pip install requests  (tkinter is stdlib)
+    python recording_assistant.py --subject p12 --no_droidgrid
+    python recording_assistant.py --subject p12
+    python recording_assistant.py --subject p12 --cameras phone1,phone2,phone3
+    python recording_assistant.py --list_gestures
 """
 
 import argparse
@@ -42,16 +52,17 @@ GESTURES_ROUND1 = [
     "flamingo_bend",
 ]
 
-GESTURES_ROUND2 = list(reversed(GESTURES_ROUND1))   # opposite order
+GESTURES_ROUND2 = list(reversed(GESTURES_ROUND1))
 
 TIMING = {
-    "fps":            30,
-    "countdown_sec":  3.0,    # before each rep — shows gesture image + 3..2..1
-    "gesture_sec":    1.5,    # GO phase — subject performs
-    "rest_sec":       1.0,    # REST phase — foot_hold between reps
-    "reps_per_gesture": 7,
-    "round_break_sec": 30.0,  # break between round 1 and round 2
-    "pre_start_sec":   3.0,   # initial wait after recording starts
+    "fps":                30,
+    "countdown_sec":      3.0,
+    "gesture_sec":        1.5,
+    "rest_sec":           1.0,
+    "reps_per_gesture":   7,
+    "round_break_sec":    30.0,
+    "pre_start_sec":      3.0,    # foot_hold before first gesture
+    "sync_delay_sec":     1.0,    # extra foot_hold AFTER recording confirmed, before session
 }
 
 GESTURE_CUES = {
@@ -65,143 +76,107 @@ GESTURE_CUES = {
     "foot_hold":     "Stand STILL\nnaturally",
 }
 
-DROIDGRID_URL     = "http://localhost:3000"
-DROIDGRID_API_START = "/api/recording/start"
-DROIDGRID_API_STOP  = "/api/recording/stop"
+DROIDGRID_URL          = "http://localhost:3000"
+DROIDGRID_API_START    = "/api/recording/start"
+DROIDGRID_API_STOP     = "/api/recording/stop"
+DROIDGRID_API_STATUS   = "/api/recording/status"
+DROIDGRID_API_CAMERAS  = "/api/cameras"
+MEDIAMTX_API_BASE      = "http://localhost:9997/v3"
 
 COLORS = {
     "bg":        "#0a0a0a",
     "panel":     "#111111",
     "border":    "#222222",
-    "countdown": "#d97706",   # amber
-    "perform":   "#16a34a",   # green
-    "rest":      "#1d4ed8",   # blue
-    "break_col": "#7c3aed",   # purple
+    "countdown": "#d97706",
+    "perform":   "#16a34a",
+    "rest":      "#1d4ed8",
+    "break_col": "#7c3aed",
     "done":      "#374151",
     "text":      "#f9fafb",
     "dim":       "#6b7280",
     "accent":    "#22c55e",
     "white":     "#ffffff",
+    "warn":      "#f59e0b",
 }
 
 FONTS = {
-    "title":    ("Helvetica", 16, "bold"),
-    "gesture":  ("Helvetica", 42, "bold"),
-    "state":    ("Helvetica", 26, "bold"),
-    "cue":      ("Helvetica", 18),
-    "timer":    ("Helvetica", 120, "bold"),
-    "small":    ("Helvetica", 14),
-    "rep":      ("Helvetica", 20, "bold"),
+    "title":   ("Helvetica", 16, "bold"),
+    "gesture": ("Helvetica", 42, "bold"),
+    "state":   ("Helvetica", 26, "bold"),
+    "cue":     ("Helvetica", 18),
+    "timer":   ("Helvetica", 120, "bold"),
+    "small":   ("Helvetica", 14),
+    "rep":     ("Helvetica", 20, "bold"),
 }
 
-# ─── GESTURE DRAWINGS (tkinter Canvas, front-view lower body) ─────────────────
+# ─── GESTURE DRAWINGS ────────────────────────────────────────────────────────
 
 def _legs(c, cx, cy, s, color_l, color_r,
-          lx=0, ly=0, la=0,   # left knee offset x, y (unused for now)
-          rx=0, ry=0,          # right knee offset x, y
-          rf_dx=0, rf_dy=0,    # right foot tip delta from right ankle
-          lf_dx=-25, lf_dy=0): # left foot tip delta
-    """Generic lower body drawing helper."""
-    # Hip bar
+          rx=0, ry=0, rf_dx=0, rf_dy=0, lf_dx=-25):
     c.create_line(cx-40*s, cy-80*s, cx+40*s, cy-80*s, fill=COLORS["white"], width=int(4*s))
-    # Left hip dot
     c.create_oval(cx-43*s, cy-83*s, cx-37*s, cy-77*s, fill=color_l, outline="")
-    # Right hip dot
     c.create_oval(cx+37*s, cy-83*s, cx+43*s, cy-77*s, fill=color_r, outline="")
-
-    # ── Left leg (always neutral) ──
-    c.create_line(cx-35*s, cy-80*s, cx-35*s, cy-10*s, fill=color_l, width=int(5*s))   # thigh
-    c.create_line(cx-35*s, cy-10*s, cx-35*s+lf_dx*s, cy+60*s, fill=color_l, width=int(5*s))  # shin
-    # left foot
-    c.create_line(cx-35*s+lf_dx*s, cy+60*s,
-                  cx-35*s+lf_dx*s-25*s, cy+60*s,
+    c.create_line(cx-35*s, cy-80*s, cx-35*s, cy-10*s, fill=color_l, width=int(5*s))
+    c.create_line(cx-35*s, cy-10*s, cx-35*s+lf_dx*s, cy+60*s, fill=color_l, width=int(5*s))
+    c.create_line(cx-35*s+lf_dx*s, cy+60*s, cx-35*s+lf_dx*s-25*s, cy+60*s,
                   fill=color_l, width=int(4*s), capstyle=tk.ROUND)
-    # left ankle dot
     c.create_oval(cx-38*s+lf_dx*s, cy+57*s, cx-32*s+lf_dx*s, cy+63*s, fill=color_l, outline="")
-
-    # ── Right leg (gesture position) ──
     knee_x = cx + 35*s + rx*s
     knee_y = cy - 10*s + ry*s
-    c.create_line(cx+35*s, cy-80*s, knee_x, knee_y, fill=color_r, width=int(5*s))   # thigh
-    # shin to ankle
+    c.create_line(cx+35*s, cy-80*s, knee_x, knee_y, fill=color_r, width=int(5*s))
     ankle_x = knee_x + rf_dx*s
     ankle_y = knee_y + 70*s + rf_dy*s
     c.create_line(knee_x, knee_y, ankle_x, ankle_y, fill=color_r, width=int(5*s))
-    # foot
     c.create_line(ankle_x, ankle_y, ankle_x+25*s, ankle_y, fill=color_r, width=int(4*s), capstyle=tk.ROUND)
-    # ankle dot
     c.create_oval(ankle_x-3*s, ankle_y-3*s, ankle_x+3*s, ankle_y+3*s, fill=color_r, outline="")
 
 
 def draw_neutral(c, w, h):
-    s = h / 280
-    cx, cy = w//2, h//2 + 20
+    s = h / 280; cx, cy = w//2, h//2 + 20
     _legs(c, cx, cy, s, COLORS["dim"], COLORS["dim"])
-
 
 def draw_heel_tap(c, w, h):
     s = h / 280; cx, cy = w//2, h//2 + 20
-    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"],
-          rf_dx=0, rf_dy=0, lf_dx=-25)
-    # Override foot to show heel-down, toe-up
+    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"])
     ankle_x = cx + 35*s; ankle_y = cy + 60*s
     c.create_line(ankle_x, ankle_y, ankle_x+30*s, ankle_y-18*s,
                   fill=COLORS["accent"], width=int(5*s), capstyle=tk.ROUND)
     c.create_oval(ankle_x-4*s, ankle_y-4*s, ankle_x+4*s, ankle_y+4*s,
-                  fill="#fbbf24", outline="")  # heel highlight
-
+                  fill="#fbbf24", outline="")
 
 def draw_foot_lift(c, w, h):
     s = h / 280; cx, cy = w//2, h//2 + 20
-    # Right knee raised forward
-    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"],
-          rx=20, ry=-55, rf_dx=0, rf_dy=-10)
-
+    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"], rx=20, ry=-55, rf_dx=0, rf_dy=-10)
 
 def draw_sideway_kick(c, w, h):
     s = h / 280; cx, cy = w//2, h//2 + 20
-    # Right leg extended sideways
-    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"],
-          rx=60, ry=20, rf_dx=30, rf_dy=-30)
-    # Arrow
+    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"], rx=60, ry=20, rf_dx=30, rf_dy=-30)
     c.create_line(cx+60*s, cy+30*s, cx+130*s, cy+30*s,
                   fill=COLORS["accent"], width=int(2*s), arrow=tk.LAST)
 
-
 def draw_forward_step(c, w, h):
     s = h / 280; cx, cy = w//2, h//2 + 20
-    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"],
-          rx=10, ry=10, rf_dx=20, rf_dy=-5)
+    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"], rx=10, ry=10, rf_dx=20, rf_dy=-5)
     c.create_line(cx+60*s, cy+45*s, cx+90*s, cy+45*s,
                   fill=COLORS["accent"], width=int(2*s), arrow=tk.LAST)
 
-
 def draw_forward_kick(c, w, h):
     s = h / 280; cx, cy = w//2, h//2 + 20
-    # Right leg kicked forward and up
-    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"],
-          rx=40, ry=-10, rf_dx=45, rf_dy=-35)
+    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"], rx=40, ry=-10, rf_dx=45, rf_dy=-35)
     c.create_line(cx+75*s, cy+20*s, cx+120*s, cy+5*s,
                   fill=COLORS["accent"], width=int(2*s), arrow=tk.LAST)
 
-
 def draw_cross_front(c, w, h):
     s = h / 280; cx, cy = w//2, h//2 + 20
-    # Right leg crossing to the left of left leg
-    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"],
-          rx=-50, ry=10, rf_dx=-25, rf_dy=0)
+    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"], rx=-50, ry=10, rf_dx=-25)
     c.create_line(cx+35*s, cy, cx-20*s, cy,
                   fill=COLORS["accent"], width=int(2*s), arrow=tk.LAST)
 
-
 def draw_flamingo_bend(c, w, h):
     s = h / 280; cx, cy = w//2, h//2 + 20
-    # Right knee bent back, foot behind and up
-    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"],
-          rx=5, ry=0, rf_dx=20, rf_dy=-80)
+    _legs(c, cx, cy, s, COLORS["dim"], COLORS["accent"], rx=5, ry=0, rf_dx=20, rf_dy=-80)
     c.create_line(cx+50*s, cy-5*s, cx+60*s, cy-50*s,
                   fill=COLORS["accent"], width=int(2*s), arrow=tk.LAST)
-
 
 DRAW_FNS = {
     "foot_hold":     draw_neutral,
@@ -214,140 +189,280 @@ DRAW_FNS = {
     "flamingo_bend": draw_flamingo_bend,
 }
 
-# ─── DROIDGRID CLIENT ─────────────────────────────────────────────────────────
+# ─── DROIDGRID CLIENT ────────────────────────────────────────────────────────
 
 class DroidGridClient:
     def __init__(self, base_url: str, enabled: bool = True):
-        self.base_url = base_url.rstrip("/")
-        self.enabled  = enabled and HAS_REQUESTS
+        self.base_url   = base_url.rstrip("/")
+        self.enabled    = enabled and HAS_REQUESTS
         self.session_id = None
+
+    def _post(self, path: str, body: dict = None, timeout: float = 5.0) -> dict:
+        try:
+            r = requests.post(self.base_url + path,
+                              json=body or {}, timeout=timeout)
+            return r.json() if r.status_code == 200 else {}
+        except Exception as e:
+            print(f"[DroidGrid] POST {path} error: {e}")
+            return {}
+
+    def _get(self, path: str, timeout: float = 3.0) -> dict:
+        try:
+            r = requests.get(self.base_url + path, timeout=timeout)
+            return r.json() if r.status_code == 200 else {}
+        except Exception as e:
+            print(f"[DroidGrid] GET {path} error: {e}")
+            return {}
 
     def start_recording(self, subject_id: str) -> bool:
         if not self.enabled:
             return True
-        try:
-            r = requests.post(
-                self.base_url + DROIDGRID_API_START,
-                json={"subject_id": subject_id, "source": "recording_assistant"},
-                timeout=3,
-            )
-            if r.status_code == 200:
-                data = r.json()
-                self.session_id = data.get("session_id") or data.get("id")
-                print(f"[DroidGrid] Recording started. Session: {self.session_id}")
+        data = self._post(DROIDGRID_API_START,
+                          {"subject_id": subject_id, "source": "recording_assistant"})
+        if data.get("ok"):
+            self.session_id = data.get("session_id") or data.get("id")
+            print(f"[DroidGrid] Recording started. Session: {self.session_id}")
+            return True
+        print(f"[DroidGrid] Start failed: {data}")
+        return False
+
+    def wait_for_recording(self, timeout_sec: float = 5.0) -> bool:
+        """
+        Poll /api/recording/status until recording=true or timeout.
+        Returns True when confirmed.
+        """
+        if not self.enabled:
+            return True
+        deadline = time.perf_counter() + timeout_sec
+        while time.perf_counter() < deadline:
+            status = self._get(DROIDGRID_API_STATUS)
+            if status.get("recording"):
+                print("[DroidGrid] Recording confirmed by server.")
                 return True
-            print(f"[DroidGrid] Start failed: {r.status_code} {r.text}")
-            return False
-        except Exception as e:
-            print(f"[DroidGrid] Start error: {e}")
-            return False
+            time.sleep(0.1)
+        print("[DroidGrid] WARNING: could not confirm recording start within timeout.")
+        return False
+
+    def get_camera_fps(self, camera_names: list) -> dict:
+        """
+        Query /api/cameras and return {camera_name: fps} for each requested camera.
+        Falls back to TIMING['fps'] if camera not found.
+        """
+        if not self.enabled:
+            return {n: TIMING["fps"] for n in camera_names}
+        data = self._get(DROIDGRID_API_CAMERAS)
+        cams = data if isinstance(data, list) else []
+        fps_map = {}
+        for name in camera_names:
+            matched = next((c for c in cams
+                            if c.get("name", "").lower() == name.lower()), None)
+            fps_map[name] = matched["fps"] if matched else TIMING["fps"]
+        return fps_map
 
     def stop_recording(self) -> dict:
         if not self.enabled:
             return {}
-        try:
-            r = requests.post(
-                self.base_url + DROIDGRID_API_STOP,
-                json={"session_id": self.session_id},
-                timeout=3,
-            )
-            if r.status_code == 200:
-                data = r.json()
-                print(f"[DroidGrid] Recording stopped. File: {data.get('file')}")
-                return data
-            print(f"[DroidGrid] Stop failed: {r.status_code}")
-            return {}
-        except Exception as e:
-            print(f"[DroidGrid] Stop error: {e}")
-            return {}
+        data = self._post(DROIDGRID_API_STOP, {"session_id": self.session_id})
+        print(f"[DroidGrid] Recording stopped. files: {data.get('files', {})}")
+        return data
 
-# ─── LABEL TRACKER ────────────────────────────────────────────────────────────
+    def get_mediamtx_recording_paths(self, camera_names: list) -> dict:
+        """
+        Query MediaMTX recording list and return {camera_name: latest_file_path}.
+        Uses the MediaMTX REST API directly (port 9997).
+        """
+        result = {}
+        if not self.enabled:
+            return result
+        try:
+            r = requests.get(f"{MEDIAMTX_API_BASE}/recordings/list", timeout=5)
+            if r.status_code != 200:
+                return result
+            items = r.json().get("items", [])
+            for item in items:
+                path_name = item.get("name", "")
+                segs = item.get("segments", [])
+                if segs:
+                    # Latest segment
+                    latest = segs[-1].get("fpath", "")
+                    for cam_name in camera_names:
+                        if cam_name.lower() in path_name.lower():
+                            result[cam_name] = latest
+        except Exception as e:
+            print(f"[MediaMTX] Could not get recording paths: {e}")
+        return result
+
+
+# ─── LABEL TRACKER ──────────────────────────────────────────────────────────
 
 class LabelTracker:
     """
-    Tracks exact frame ranges for each phase and emits a label JSON
-    in the same format used by label_videos_v3.py and fix_labels.py.
+    Tracks exact frame ranges for each phase.
+
+    Frame numbers are anchored to the moment DroidGrid confirmed recording
+    started, plus any sync_delay. The `_wall_start` is set externally by
+    RecordingAssistant to this confirmed start time.
+
+    Each segment stores both frame numbers (for model training) and
+    wall-clock seconds relative to recording start (for re-anchoring
+    if actual fps differed from nominal fps).
     """
+
     def __init__(self, fps: int, subject_id: str, camera_id: int = 0):
         self.fps         = fps
         self.subject_id  = subject_id
         self.camera_id   = camera_id
-        self.segments    = []
+        self.segments:   list = []
         self._frame      = 0
+        self._wall_sec   = 0.0       # cumulative seconds from recording start
+        self._wall_start = 0.0       # absolute perf_counter of recording frame 0
+        self._checkpoint_cb = None   # called after each gesture completes
+
+    def set_wall_start(self, t: float):
+        """Set the absolute time that corresponds to frame 0 of the recording."""
+        self._wall_start = t
 
     def add(self, gesture: str, duration_sec: float):
-        n = round(duration_sec * self.fps)
+        """
+        Record a phase as a segment.
+
+        Uses the NOMINAL duration passed in (not measured wall-clock) so that
+        label boundaries are deterministic regardless of tick jitter. The
+        wall-clock times stored are also nominal (cumulative sums), which gives
+        consistent labels across sessions.
+        """
+        n_frames   = round(duration_sec * self.fps)
+        start_sec  = self._wall_sec
+        end_sec    = self._wall_sec + duration_sec
+
         self.segments.append({
             "gesture":     gesture,
             "start_frame": self._frame,
-            "end_frame":   self._frame + n - 1,
+            "end_frame":   self._frame + n_frames - 1,
+            "start_sec":   round(start_sec, 4),
+            "end_sec":     round(end_sec,   4),
+            "duration_sec": round(duration_sec, 4),
         })
-        self._frame += n
+        self._frame    += n_frames
+        self._wall_sec += duration_sec
+
+    def notify_gesture_complete(self, gesture: str):
+        """Call after all reps of a gesture are done (for checkpoint saves)."""
+        if self._checkpoint_cb:
+            self._checkpoint_cb(gesture, self)
 
     @property
-    def total_frames(self):
+    def total_frames(self) -> int:
         return self._frame
 
-    def build_json(self, video_file: str = "", droidgrid_meta: dict = None) -> dict:
-        gesture_order = [s["gesture"] for s in self.segments]
-        # Deduplicate preserving order
-        seen = set()
-        unique_gestures = []
-        for g in gesture_order:
-            if g not in seen:
-                seen.add(g)
-                unique_gestures.append(g)
+    @property
+    def total_sec(self) -> float:
+        return self._wall_sec
 
+    def build_json(self, video_file: str = "",
+                   droidgrid_meta: dict = None,
+                   actual_fps: float | None = None) -> dict:
+        seen, unique = set(), []
+        for s in self.segments:
+            g = s["gesture"]
+            if g not in seen:
+                seen.add(g); unique.append(g)
         return {
-            "video_file":    video_file,
-            "subject_id":    self.subject_id,
-            "camera_id":     self.camera_id,
-            "fps":           self.fps,
-            "total_frames":  self.total_frames,
-            "recorded_at":   datetime.now().isoformat(),
-            "generator":     "recording_assistant_v1",
-            "gesture_order": unique_gestures,
-            "droidgrid":     droidgrid_meta or {},
-            "segments":      self.segments,
+            "video_file":        video_file,
+            "subject_id":        self.subject_id,
+            "camera_id":         self.camera_id,
+            "nominal_fps":       self.fps,
+            "actual_fps":        actual_fps or self.fps,
+            "total_frames":      self.total_frames,
+            "total_sec":         round(self.total_sec, 3),
+            "recorded_at":       datetime.now().isoformat(),
+            "generator":         "recording_assistant_v1.2",
+            "sync_note":         (
+                "Frame numbers anchored to the moment DroidGrid confirmed "
+                "recording start, plus sync_delay_sec of pre-roll. "
+                "Use actual_fps and start_sec/end_sec for re-anchoring."
+            ),
+            "gesture_order":     unique,
+            "droidgrid":         droidgrid_meta or {},
+            "segments":          self.segments,
         }
 
-    def save(self, path: str, video_file: str = "", droidgrid_meta: dict = None):
-        data = self.build_json(video_file, droidgrid_meta)
+    def save(self, path: str, video_file: str = "",
+             droidgrid_meta: dict = None, actual_fps: float | None = None) -> dict:
+        data = self.build_json(video_file, droidgrid_meta, actual_fps)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
-        print(f"[Labels] Saved → {path}  ({len(self.segments)} segments, {self.total_frames} frames)")
+        print(f"[Labels] Saved → {path}  "
+              f"({len(self.segments)} segments, {self.total_frames} frames, "
+              f"{self.total_sec:.1f}s)")
         return data
 
-# ─── MAIN APP ─────────────────────────────────────────────────────────────────
+    def save_checkpoint(self, path: str):
+        """Save partial labels — called after each gesture for crash recovery."""
+        data = self.build_json(video_file="__CHECKPOINT__")
+        data["is_checkpoint"] = True
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+
+
+# ─── MAIN APP ────────────────────────────────────────────────────────────────
 
 class RecordingAssistant:
 
-    STATE_IDLE       = "IDLE"
-    STATE_PRESTART   = "PRESTART"
-    STATE_COUNTDOWN  = "COUNTDOWN"
-    STATE_PERFORM    = "PERFORM"
-    STATE_REST       = "REST"
-    STATE_NEXT       = "NEXT"
-    STATE_BREAK      = "BREAK"
-    STATE_DONE       = "DONE"
+    STATE_IDLE      = "IDLE"
+    STATE_SYNC_WAIT = "SYNC_WAIT"   # ← NEW: waiting for DroidGrid to confirm
+    STATE_PRESTART  = "PRESTART"
+    STATE_COUNTDOWN = "COUNTDOWN"
+    STATE_PERFORM   = "PERFORM"
+    STATE_REST      = "REST"
+    STATE_BREAK     = "BREAK"
+    STATE_DONE      = "DONE"
 
     def __init__(self, args):
         self.args       = args
         self.subject_id = args.subject
-        self.fps        = TIMING["fps"]
+        self.fps        = args.fps
         self.state      = self.STATE_IDLE
         self.dg         = DroidGridClient(args.droidgrid_url, not args.no_droidgrid)
-        self.tracker    = LabelTracker(self.fps, self.subject_id, camera_id=0)
+
+        # Camera list from args
+        if args.cameras:
+            self.camera_names = [c.strip() for c in args.cameras.split(",")]
+        else:
+            self.camera_names = ["phone1"]   # default single camera
+
+        # One tracker per camera (they share the same timeline)
+        self.trackers: dict[str, LabelTracker] = {}
+        for i, cam in enumerate(self.camera_names):
+            self.trackers[cam] = LabelTracker(self.fps, self.subject_id, camera_id=i)
+
+        # Checkpoint directory
+        self.checkpoint_dir = Path(args.output_dir) / "__checkpoints__"
 
         # Session state
-        self.all_gestures  = GESTURES_ROUND1 + GESTURES_ROUND2
-        self.gesture_idx   = 0
-        self.rep           = 0
-        self.phase_end     = 0.0    # absolute time.perf_counter() when phase ends
-        self.recording_start = 0.0  # when we actually started
+        self.all_gestures    = GESTURES_ROUND1 + GESTURES_ROUND2
+        self.gesture_idx     = 0
+        self.rep             = 0
+        self.phase_end       = 0.0
+        self.recording_start = 0.0   # wall-clock when tracker frame 0 corresponds to
+        self._dg_meta        = {}    # from DroidGrid stop response
 
         self._build_ui()
+
+    # ── tracker proxy ───────────────────────────────────────────────────────
+
+    def _add_all(self, gesture: str, duration_sec: float):
+        """Add the same segment to every camera's tracker simultaneously."""
+        for tracker in self.trackers.values():
+            tracker.add(gesture, duration_sec)
+
+    def _save_checkpoint(self, gesture: str):
+        """Crash-recovery checkpoint after each gesture completes."""
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        for cam, tracker in self.trackers.items():
+            cp_path = self.checkpoint_dir / f"{self.subject_id}_{cam}_ckpt.json"
+            tracker.save_checkpoint(str(cp_path))
 
     # ── UI ──────────────────────────────────────────────────────────────────
 
@@ -356,8 +471,6 @@ class RecordingAssistant:
         self.root.title("FERN Recording Assistant")
         self.root.configure(bg=COLORS["bg"])
         self.root.attributes("-fullscreen", True)
-
-        # Allow ESC to exit
         self.root.bind("<Escape>", lambda e: self._confirm_quit())
         self.root.bind("<space>",  lambda e: self._on_space())
 
@@ -365,38 +478,31 @@ class RecordingAssistant:
         H = self.root.winfo_screenheight()
         self.W, self.H = W, H
 
-        # ── Header bar ──
+        # Header
         header = tk.Frame(self.root, bg=COLORS["panel"], height=60)
         header.pack(fill=tk.X, side=tk.TOP)
         header.pack_propagate(False)
-
         self.lbl_title = tk.Label(header, text="FERN  Recording Assistant",
-                                   font=FONTS["title"], bg=COLORS["panel"],
-                                   fg=COLORS["dim"])
+                                   font=FONTS["title"], bg=COLORS["panel"], fg=COLORS["dim"])
         self.lbl_title.pack(side=tk.LEFT, padx=20, pady=12)
-
-        self.lbl_subject = tk.Label(header, text=f"Subject: {self.subject_id}",
-                                     font=FONTS["title"], bg=COLORS["panel"],
-                                     fg=COLORS["text"])
+        self.lbl_subject = tk.Label(header,
+                                     text=f"Subject: {self.subject_id}   Cameras: {', '.join(self.camera_names)}",
+                                     font=FONTS["title"], bg=COLORS["panel"], fg=COLORS["text"])
         self.lbl_subject.pack(side=tk.LEFT, padx=30, pady=12)
-
         self.lbl_progress = tk.Label(header, text="", font=FONTS["title"],
                                       bg=COLORS["panel"], fg=COLORS["dim"])
         self.lbl_progress.pack(side=tk.RIGHT, padx=20, pady=12)
 
-        # ── Main body: left = drawing, right = state ──
+        # Body
         body = tk.Frame(self.root, bg=COLORS["bg"])
         body.pack(fill=tk.BOTH, expand=True)
 
-        # Left panel — gesture drawing
         left_w = int(W * 0.38)
-        left_frame = tk.Frame(body, bg=COLORS["panel"],
-                               width=left_w, bd=0, highlightthickness=0)
+        left_frame = tk.Frame(body, bg=COLORS["panel"], width=left_w, bd=0, highlightthickness=0)
         left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(20, 10), pady=20)
         left_frame.pack_propagate(False)
 
-        self.lbl_gesture_name = tk.Label(left_frame, text="",
-                                          font=FONTS["gesture"],
+        self.lbl_gesture_name = tk.Label(left_frame, text="", font=FONTS["gesture"],
                                           bg=COLORS["panel"], fg=COLORS["text"],
                                           wraplength=left_w - 40)
         self.lbl_gesture_name.pack(pady=(30, 10))
@@ -411,42 +517,31 @@ class RecordingAssistant:
                                  wraplength=left_w - 40, justify=tk.CENTER)
         self.lbl_cue.pack(pady=10)
 
-        # Right panel — countdown and state
         right_frame = tk.Frame(body, bg=COLORS["bg"])
-        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
-                          padx=(10, 20), pady=20)
+        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 20), pady=20)
 
         self.state_banner = tk.Frame(right_frame, bg=COLORS["bg"], bd=0)
         self.state_banner.pack(fill=tk.BOTH, expand=True)
 
         self.lbl_state = tk.Label(self.state_banner, text="PRESS  SPACE  TO  START",
-                                   font=FONTS["state"], bg=COLORS["bg"],
-                                   fg=COLORS["dim"])
+                                   font=FONTS["state"], bg=COLORS["bg"], fg=COLORS["dim"])
         self.lbl_state.pack(pady=(40, 10))
 
         self.lbl_timer = tk.Label(self.state_banner, text="",
-                                   font=FONTS["timer"], bg=COLORS["bg"],
-                                   fg=COLORS["text"])
+                                   font=FONTS["timer"], bg=COLORS["bg"], fg=COLORS["text"])
         self.lbl_timer.pack(pady=0)
 
         self.lbl_rep = tk.Label(self.state_banner, text="",
-                                 font=FONTS["rep"], bg=COLORS["bg"],
-                                 fg=COLORS["dim"])
+                                 font=FONTS["rep"], bg=COLORS["bg"], fg=COLORS["dim"])
         self.lbl_rep.pack(pady=10)
 
-        # Progress bar (bottom of right panel)
-        self.progress_bar_bg = tk.Frame(self.state_banner, bg=COLORS["border"],
-                                         height=8)
-        self.progress_bar_bg.pack(fill=tk.X, side=tk.BOTTOM, padx=0, pady=20)
-        self.progress_bar = tk.Frame(self.progress_bar_bg, bg=COLORS["dim"],
-                                      height=8, width=0)
+        self.progress_bar_bg = tk.Frame(self.state_banner, bg=COLORS["border"], height=8)
+        self.progress_bar_bg.pack(fill=tk.X, side=tk.BOTTOM, pady=20)
+        self.progress_bar = tk.Frame(self.progress_bar_bg, bg=COLORS["dim"], height=8, width=0)
         self.progress_bar.place(x=0, y=0, relheight=1)
 
-        # Bottom help
-        self.lbl_help = tk.Label(self.root,
-                                  text="SPACE = start/pause   ESC = quit",
-                                  font=FONTS["small"], bg=COLORS["bg"],
-                                  fg=COLORS["dim"])
+        self.lbl_help = tk.Label(self.root, text="SPACE = start   ESC = quit",
+                                  font=FONTS["small"], bg=COLORS["bg"], fg=COLORS["dim"])
         self.lbl_help.pack(side=tk.BOTTOM, pady=8)
 
         self._draw_gesture("foot_hold")
@@ -454,11 +549,10 @@ class RecordingAssistant:
     def _draw_gesture(self, gesture: str):
         self.canvas.delete("all")
         fn = DRAW_FNS.get(gesture, draw_neutral)
-        cw = self.canvas.winfo_width() or (int(self.W * 0.38) - 40)
+        cw = self.canvas.winfo_width()  or (int(self.W * 0.38) - 40)
         ch = self.canvas.winfo_height() or int(self.H * 0.38)
         fn(self.canvas, cw, ch)
-        display_name = gesture.replace("_", "  ").upper()
-        self.lbl_gesture_name.config(text=display_name)
+        self.lbl_gesture_name.config(text=gesture.replace("_", "  ").upper())
         self.lbl_cue.config(text=GESTURE_CUES.get(gesture, ""))
 
     def _set_state_color(self, color_key: str):
@@ -476,11 +570,9 @@ class RecordingAssistant:
 
     def _set_progress_header(self):
         total = len(self.all_gestures)
-        done  = self.gesture_idx
         rnd   = "Round 1" if self.gesture_idx < len(GESTURES_ROUND1) else "Round 2"
         self.lbl_progress.config(
-            text=f"{rnd}   {done}/{total} gestures"
-        )
+            text=f"{rnd}   {self.gesture_idx}/{total} gestures")
 
     # ── Session flow ─────────────────────────────────────────────────────────
 
@@ -489,28 +581,79 @@ class RecordingAssistant:
             self._start_session()
 
     def _start_session(self):
-        # DroidGrid
+        """
+        Start DroidGrid recording, then enter SYNC_WAIT state.
+
+        The SYNC_WAIT state polls the DroidGrid API every 100ms until
+        recording is confirmed (or timeout). Only then does the session
+        and the tracker begin. This ensures frame 0 of the label JSON
+        corresponds to the actual first frame written by MediaMTX.
+        """
         if not self.args.no_droidgrid:
             ok = self.dg.start_recording(self.subject_id)
             if not ok:
                 if not messagebox.askyesno(
                     "DroidGrid",
-                    "Could not connect to DroidGrid.\nContinue without recording?",
+                    "Could not connect to DroidGrid.\nContinue without recording?"
                 ):
                     return
 
-        self.recording_start = time.perf_counter()
-        self.gesture_idx = 0
-        self.rep = 0
-
-        # Pre-start foot_hold
-        self.tracker.add("foot_hold", TIMING["pre_start_sec"])
+        # Enter sync-wait state: show spinner, poll for confirmation
+        self.state = self.STATE_SYNC_WAIT
         self._set_state_color("done")
-        self.lbl_state.config(text="STARTING IN...")
-        self.lbl_timer.config(text="")
-        self.state = self.STATE_PRESTART
-        self.phase_end = time.perf_counter() + TIMING["pre_start_sec"]
-        self.root.after(50, self._tick)
+        self.lbl_state.config(text="WAITING FOR CAMERA...")
+        self.lbl_timer.config(text="●")
+        self.lbl_rep.config(text="confirming recording start")
+        self._sync_wait_start = time.perf_counter()
+        self._sync_poll_count = 0
+        self.root.after(100, self._poll_recording_start)
+
+    def _poll_recording_start(self):
+        """Poll every 100ms until DroidGrid confirms recording=true."""
+        self._sync_poll_count += 1
+        elapsed = time.perf_counter() - self._sync_wait_start
+
+        # Animate spinner
+        dots = "●" * (self._sync_poll_count % 4 + 1)
+        self.lbl_timer.config(text=dots)
+
+        if not self.args.no_droidgrid:
+            confirmed = self.dg.wait_for_recording(timeout_sec=0.0)  # single poll
+        else:
+            confirmed = True   # no DroidGrid — proceed immediately
+
+        timeout_sec = 5.0
+        if confirmed or elapsed > timeout_sec:
+            if not confirmed:
+                print("[WARNING] DroidGrid recording not confirmed. Proceeding anyway.")
+
+            # NOW add sync_delay: extra pre-roll before session starts.
+            # This gives MediaMTX time to flush its buffer.
+            sync_delay = TIMING["sync_delay_sec"]
+            self._recording_confirmed_at = time.perf_counter()
+
+            # Anchor all trackers: frame 0 starts NOW (after sync_delay will be added)
+            for tracker in self.trackers.values():
+                tracker.set_wall_start(self._recording_confirmed_at)
+
+            # Add sync_delay as foot_hold BEFORE pre_start
+            self._add_all("foot_hold", sync_delay)
+            self._add_all("foot_hold", TIMING["pre_start_sec"])
+
+            # Wall-clock anchor for the session timer
+            self.recording_start  = self._recording_confirmed_at
+            self.gesture_idx      = 0
+            self.rep              = 0
+
+            self.lbl_state.config(text="STARTING IN...")
+            self.lbl_timer.config(text="")
+            self.lbl_rep.config(text="")
+            self.state    = self.STATE_PRESTART
+            total_preroll = sync_delay + TIMING["pre_start_sec"]
+            self.phase_end = time.perf_counter() + total_preroll
+            self.root.after(33, self._tick)
+        else:
+            self.root.after(100, self._poll_recording_start)
 
     def _tick(self):
         now  = time.perf_counter()
@@ -526,8 +669,7 @@ class RecordingAssistant:
 
         elif self.state == self.STATE_COUNTDOWN:
             self.lbl_timer.config(text=f"{math.ceil(left)}")
-            pct = 1 - left / TIMING["countdown_sec"]
-            self._update_progress_bar(pct)
+            self._update_progress_bar(1 - left / TIMING["countdown_sec"])
             if now >= self.phase_end:
                 self._begin_perform()
             else:
@@ -535,8 +677,7 @@ class RecordingAssistant:
 
         elif self.state == self.STATE_PERFORM:
             self.lbl_timer.config(text=f"{left:.1f}")
-            pct = 1 - left / TIMING["gesture_sec"]
-            self._update_progress_bar(pct)
+            self._update_progress_bar(1 - left / TIMING["gesture_sec"])
             if now >= self.phase_end:
                 self._begin_rest()
             else:
@@ -544,8 +685,7 @@ class RecordingAssistant:
 
         elif self.state == self.STATE_REST:
             self.lbl_timer.config(text=f"{left:.1f}")
-            pct = 1 - left / TIMING["rest_sec"]
-            self._update_progress_bar(pct)
+            self._update_progress_bar(1 - left / TIMING["rest_sec"])
             if now >= self.phase_end:
                 self._after_rest()
             else:
@@ -553,8 +693,7 @@ class RecordingAssistant:
 
         elif self.state == self.STATE_BREAK:
             self.lbl_timer.config(text=f"{math.ceil(left)}")
-            pct = 1 - left / TIMING["round_break_sec"]
-            self._update_progress_bar(pct)
+            self._update_progress_bar(1 - left / TIMING["round_break_sec"])
             if now >= self.phase_end:
                 self._begin_gesture()
             else:
@@ -564,7 +703,6 @@ class RecordingAssistant:
         if self.gesture_idx >= len(self.all_gestures):
             self._finish_session()
             return
-
         gesture = self.all_gestures[self.gesture_idx]
         self.rep = 0
         self._draw_gesture(gesture)
@@ -572,30 +710,24 @@ class RecordingAssistant:
         self._begin_countdown()
 
     def _begin_countdown(self):
-        gesture = self.all_gestures[self.gesture_idx]
-        n_reps  = TIMING["reps_per_gesture"]
-
+        n_reps = TIMING["reps_per_gesture"]
         self.state = self.STATE_COUNTDOWN
         self._set_state_color("countdown")
-        self.lbl_state.config(text=f"GET READY   REP {self.rep + 1} / {n_reps}",
-                               fg=COLORS["text"])
+        self.lbl_state.config(
+            text=f"GET READY   REP {self.rep + 1} / {n_reps}", fg=COLORS["text"])
         self.lbl_rep.config(text="")
-
-        # Track countdown as foot_hold
-        self.tracker.add("foot_hold", TIMING["countdown_sec"])
+        self._add_all("foot_hold", TIMING["countdown_sec"])
         self.phase_end = time.perf_counter() + TIMING["countdown_sec"]
         self.root.after(33, self._tick)
 
     def _begin_perform(self):
         gesture = self.all_gestures[self.gesture_idx]
         n_reps  = TIMING["reps_per_gesture"]
-
         self.state = self.STATE_PERFORM
         self._set_state_color("perform")
         self.lbl_state.config(text="G  O !", fg=COLORS["white"])
         self.lbl_rep.config(text=f"rep {self.rep + 1} of {n_reps}", fg=COLORS["white"])
-
-        self.tracker.add(gesture, TIMING["gesture_sec"])
+        self._add_all(gesture, TIMING["gesture_sec"])
         self.phase_end = time.perf_counter() + TIMING["gesture_sec"]
         self.root.after(33, self._tick)
 
@@ -605,20 +737,18 @@ class RecordingAssistant:
         self.lbl_state.config(text="REST", fg=COLORS["white"])
         self.lbl_timer.config(text="")
         self.lbl_rep.config(text="return to neutral", fg=COLORS["white"])
-
-        self.tracker.add("foot_hold", TIMING["rest_sec"])
+        self._add_all("foot_hold", TIMING["rest_sec"])
         self.phase_end = time.perf_counter() + TIMING["rest_sec"]
         self.root.after(33, self._tick)
 
     def _after_rest(self):
         self.rep += 1
         n_reps = TIMING["reps_per_gesture"]
-
         if self.rep >= n_reps:
-            # Done with this gesture
+            # All reps for this gesture done — save checkpoint
+            gesture = self.all_gestures[self.gesture_idx]
+            self._save_checkpoint(gesture)
             self.gesture_idx += 1
-
-            # Check if we hit the round break
             if self.gesture_idx == len(GESTURES_ROUND1):
                 self._begin_round_break()
             elif self.gesture_idx >= len(self.all_gestures):
@@ -634,37 +764,63 @@ class RecordingAssistant:
         self.lbl_state.config(text="ROUND 1 DONE — RELAX", fg=COLORS["white"])
         self.lbl_rep.config(text="Round 2 starts in...", fg=COLORS["white"])
         self._draw_gesture("foot_hold")
-
-        self.tracker.add("foot_hold", TIMING["round_break_sec"])
+        self._add_all("foot_hold", TIMING["round_break_sec"])
         self.phase_end = time.perf_counter() + TIMING["round_break_sec"]
         self.root.after(33, self._tick)
 
     def _finish_session(self):
-        self.state = self.STATE_DONE
-        elapsed = time.perf_counter() - self.recording_start
+        self.state  = self.STATE_DONE
+        elapsed     = time.perf_counter() - self.recording_start
+        dg_meta     = self.dg.stop_recording()
 
-        # Stop DroidGrid
-        dg_meta = self.dg.stop_recording()
+        # Give MediaMTX 500ms to finalise files before querying paths
+        time.sleep(0.5)
+        mediamtx_files = self.dg.get_mediamtx_recording_paths(self.camera_names)
 
-        # Save label JSON
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        video_file = dg_meta.get("file", f"{self.subject_id}_c3_{ts}.mp4")
-        json_name  = Path(video_file).stem + ".json"
-        json_path  = Path(self.args.output_dir) / json_name
-        self.tracker.save(str(json_path), video_file, dg_meta)
+        # Get actual fps per camera from DroidGrid
+        fps_map = self.dg.get_camera_fps(self.camera_names)
 
-        # UI
+        # ── Save one label JSON per camera ──────────────────────────────────
+        ts        = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir   = Path(self.args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        saved_paths = []
+
+        for cam_name, tracker in self.trackers.items():
+            # Determine video file path
+            video_file = (
+                mediamtx_files.get(cam_name)
+                or dg_meta.get("files", {}).get(cam_name)
+                or f"{self.subject_id}_{cam_name}_{ts}.mp4"
+            )
+            actual_fps = fps_map.get(cam_name, self.fps)
+
+            # Filename for the label JSON matches the video stem
+            video_stem = Path(video_file).stem if video_file else f"{self.subject_id}_{cam_name}_{ts}"
+            json_path  = out_dir / f"{video_stem}.json"
+
+            tracker.save(
+                str(json_path),
+                video_file  = str(video_file),
+                droidgrid_meta = dg_meta,
+                actual_fps  = actual_fps,
+            )
+            saved_paths.append(json_path)
+
+        # Clean up checkpoints now that session completed successfully
+        if self.checkpoint_dir.exists():
+            for cp in self.checkpoint_dir.glob("*.json"):
+                cp.unlink(missing_ok=True)
+
+        # UI update
+        first_tracker = list(self.trackers.values())[0]
         self._set_state_color("done")
         self.lbl_gesture_name.config(text="SESSION DONE")
-        self.lbl_state.config(
-            text=f"Label JSON saved",
-            fg=COLORS["accent"],
-        )
+        self.lbl_state.config(text="Label JSONs saved", fg=COLORS["accent"])
         self.lbl_timer.config(text="✓")
         self.lbl_rep.config(
-            text=f"{len(self.tracker.segments)} segments · {elapsed:.0f}s · {json_path}",
-            fg=COLORS["dim"],
-        )
+            text=f"{len(first_tracker.segments)} segments · {elapsed:.0f}s · {len(saved_paths)} file(s)",
+            fg=COLORS["dim"])
         self.canvas.delete("all")
         self.lbl_help.config(text="ESC to exit")
         self._update_progress_bar(1.0)
@@ -673,38 +829,48 @@ class RecordingAssistant:
         print(f"\n{'='*60}")
         print(f"Session complete.")
         print(f"Subject:  {self.subject_id}")
-        print(f"Duration: {elapsed:.0f}s")
-        print(f"Frames:   {self.tracker.total_frames} (at {self.fps}fps)")
-        print(f"Label:    {json_path}")
+        print(f"Duration: {elapsed:.0f}s  ({first_tracker.total_frames} frames at {self.fps}fps nominal)")
+        for p in saved_paths:
+            print(f"Label:    {p}")
         print(f"{'='*60}\n")
 
     def _confirm_quit(self):
         if self.state not in [self.STATE_IDLE, self.STATE_DONE]:
-            if not messagebox.askyesno("Quit", "Session in progress. Quit now?\n(Label JSON will NOT be saved)"):
+            if not messagebox.askyesno(
+                "Quit",
+                "Session in progress.\n\nCheckpoints were saved after each gesture.\n"
+                "Quit now? (final label JSON will NOT be saved)"
+            ):
                 return
         self.root.destroy()
 
     def run(self):
         self.root.mainloop()
 
-# ─── ENTRY POINT ──────────────────────────────────────────────────────────────
+
+# ─── ENTRY POINT ─────────────────────────────────────────────────────────────
 
 def main():
-    p = argparse.ArgumentParser(description="FERN v2 Recording Assistant")
+    p = argparse.ArgumentParser(description="FERN v2 Recording Assistant v1.2")
     p.add_argument("--subject",       default="p_new",
                    help="Subject ID (e.g. p12)")
     p.add_argument("--output_dir",    default="data/new_recordings",
                    help="Directory to save label JSONs")
-    p.add_argument("--fps",           type=int, default=30,
-                   help="Camera FPS (default 30)")
-    p.add_argument("--reps",          type=int, default=7,
+    p.add_argument("--fps",           type=int, default=TIMING["fps"],
+                   help="Nominal camera FPS (default 30)")
+    p.add_argument("--reps",          type=int, default=TIMING["reps_per_gesture"],
                    help="Repetitions per gesture (default 7)")
+    p.add_argument("--sync_delay",    type=float, default=TIMING["sync_delay_sec"],
+                   help="Extra pre-roll seconds after recording confirmed (default 1.0)")
+    p.add_argument("--cameras",       default="",
+                   help="Comma-separated camera names matching DroidGrid config "
+                        "(e.g. phone1,phone2,phone3). Default: phone1")
     p.add_argument("--no_droidgrid",  action="store_true",
                    help="Run without DroidGrid integration")
     p.add_argument("--droidgrid_url", default=DROIDGRID_URL,
                    help=f"DroidGrid backend URL (default {DROIDGRID_URL})")
     p.add_argument("--camera_id",     type=int, default=0,
-                   help="Camera ID for label JSON (0=c3 front)")
+                   help="Legacy: camera_id for label JSON when using single camera")
     p.add_argument("--list_gestures", action="store_true",
                    help="Print gesture list and exit")
 
@@ -713,18 +879,18 @@ def main():
     if args.list_gestures:
         print("Round 1:", GESTURES_ROUND1)
         print("Round 2:", GESTURES_ROUND2)
-        print(f"Total: {len(GESTURES_ROUND1) * 2} gestures × {TIMING['reps_per_gesture']} reps each")
+        print(f"Total: {len(GESTURES_ROUND1) * 2} gestures × {TIMING['reps_per_gesture']} reps")
         return
 
     if not HAS_REQUESTS and not args.no_droidgrid:
         print("WARNING: 'requests' not installed. DroidGrid disabled.")
         print("         Install: pip install requests")
-        print("         Or run with --no_droidgrid\n")
         args.no_droidgrid = True
 
     # Apply CLI overrides
     TIMING["fps"]              = args.fps
     TIMING["reps_per_gesture"] = args.reps
+    TIMING["sync_delay_sec"]   = args.sync_delay
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     app = RecordingAssistant(args)

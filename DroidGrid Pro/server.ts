@@ -7,6 +7,7 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import http from "http";
+import { EventEmitter } from "events";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -20,6 +21,16 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 const MEDIAMTX_API = "http://localhost:9997/v3";
 const MEDIAMTX_BASE = "http://localhost:8889";
 const RETENTION_DAYS = parseInt(process.env.RETENTION_DAYS ?? "30", 10);
+
+// ── Addon event bus ────────────────────────────────────────────────────────
+const addonEventBus = new EventEmitter();
+addonEventBus.setMaxListeners(100);
+
+interface LoadedAddonEntry {
+  instance: unknown;
+  manifest: Record<string, unknown>;
+  enabled: boolean;
+}
 
 function readJson<T>(file: string, fallback: T): T {
   try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
@@ -108,6 +119,36 @@ async function checkAllCameras() {
   writeJson(CAMERAS_FILE, cameras);
 }
 
+// ── MediaMTX recording helpers ──────────────────────────────────────────────
+async function getMediaMTXRecordingPaths(cameraNames: string[]): Promise<Record<string, string>> {
+  const result: Record<string, string> = {};
+  try {
+    const resp = await fetch(`${MEDIAMTX_API}/recordings/list`);
+    if (!resp.ok) return result;
+    const data = await resp.json() as { items?: Array<{ name: string; segments: Array<{ fpath: string }> }> };
+    for (const item of data.items ?? []) {
+      const segs = item.segments ?? [];
+      if (segs.length === 0) continue;
+      const latest = segs[segs.length - 1].fpath;
+      for (const camName of cameraNames) {
+        if (item.name.toLowerCase().includes(camName.toLowerCase())) {
+          result[camName] = latest;
+        }
+      }
+    }
+  } catch (e) {
+    addLog("MEDIAMTX", `getMediaMTXRecordingPaths error: ${e}`, "warn");
+  }
+  return result;
+}
+
+async function stopMediaMTXPath(pathName: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${MEDIAMTX_API}/config/paths/${pathName}/record/stop`, { method: "POST" });
+    return r.ok;
+  } catch { return false; }
+}
+
 addLog("SERVER", "DroidGrid Pro backend started", "success");
 setTimeout(checkAllCameras, 1500);
 setInterval(checkAllCameras, 30000);
@@ -185,57 +226,73 @@ async function startServer() {
   });
 
   // ── Recording ─────────────────────────────────────────────────────────────
-  app.post("/api/recording/start", async (_req,res) => {
-    if (isRecording) { res.json({ok:false,msg:"Already recording"}); return; }
-    const online = cameras.filter(c=>c.enabled&&c.status==="online");
-    if (!online.length) { addLog("REC","Start failed — no cameras online","error"); res.json({ok:false,msg:"No cameras online"}); return; }
+  app.post("/api/recording/start", async (req: Request, res: Response) => {
+    if (isRecording) { res.json({ ok: false, msg: "Already recording" }); return; }
+    const online = cameras.filter(c => c.enabled && c.status === "online");
+    if (!online.length) {
+      addLog("REC", "Start failed — no cameras online", "error");
+      res.json({ ok: false, msg: "No cameras online" }); return;
+    }
 
-    // Try MediaMTX recording first, fall back to legacy mode
+    const session_id = `${session.label}_${session.person}_${session.repeat}_${Date.now()}`;
     const mtResults = await Promise.all(online.map(async (cam) => {
       const pathName = cam.name.toLowerCase().replace(/[\s_]+/g, "-");
       try {
-        const r = await fetch(`${MEDIAMTX_API}/config/paths/${pathName}/record/start`, {method:"POST"});
-        return { cam:cam.name, ok:r.ok, mt:true };
-      } catch { return { cam:cam.name, ok:false, mt:true }; }
+        const r = await fetch(`${MEDIAMTX_API}/config/paths/${pathName}/record/start`, { method: "POST" });
+        return { cam: cam.name, ok: r.ok, mt: true };
+      } catch { return { cam: cam.name, ok: false, mt: true }; }
     }));
-    const mtStarted = mtResults.filter(r=>r.ok).length;
+    const mtStarted = mtResults.filter(r => r.ok).length;
 
     isRecording = true;
     recordingStartTime = Date.now();
-    online.forEach(c=>{ c.status="recording"; });
+    online.forEach(c => { c.status = "recording"; });
     writeJson(CAMERAS_FILE, cameras);
     const mode = mtStarted > 0 ? `MediaMTX(${mtStarted})` : "legacy";
-    addLog("REC",`Started: ${session.label}/${session.person}/${session.repeat} (${online.length} cams, ${mode})`,"success");
-    res.json({ok:true, cameras:online.length, mediamtx:mtStarted, session:{...session}});
+    const subject_id = req.body?.subject_id ?? "unknown";
+    addLog("REC", `Started: ${session.label}/${session.person}/${session.repeat} (${online.length} cams, ${mode}, subject: ${subject_id})`, "success");
+    res.json({ ok: true, session_id, cameras: online.length, mediamtx: mtStarted, session: { ...session } });
   });
 
-  app.post("/api/recording/stop", async (_req,res) => {
-    if (!isRecording) { res.json({ok:false,msg:"Not recording"}); return; }
-    const duration = recordingStartTime ? Math.round((Date.now()-recordingStartTime)/1000) : 0;
+  app.post("/api/recording/stop", async (req: Request, res: Response) => {
+    if (!isRecording) { res.json({ ok: false, msg: "Not recording" }); return; }
+    const duration = recordingStartTime ? Math.round((Date.now() - recordingStartTime) / 1000) : 0;
 
-    // Stop MediaMTX recordings
-    const recording_cams = cameras.filter(c=>c.status==="recording");
+    const recording_cams = cameras.filter(c => c.status === "recording");
     await Promise.all(recording_cams.map(async (cam) => {
       const pathName = cam.name.toLowerCase().replace(/[\s_]+/g, "-");
-      try { await fetch(`${MEDIAMTX_API}/config/paths/${pathName}/record/stop`, {method:"POST"}); } catch {}
+      await stopMediaMTXPath(pathName);
     }));
+
+    // Give MediaMTX time to close the file before querying paths
+    await new Promise(r => setTimeout(r, 600));
+
+    const cameraNames = recording_cams.map(c => c.name);
+    const files = await getMediaMTXRecordingPaths(cameraNames);
 
     isRecording = false;
     recordingStartTime = null;
-    cameras.forEach(c=>{ if(c.status==="recording") c.status="online"; });
+    cameras.forEach(c => { if (c.status === "recording") c.status = "online"; });
     writeJson(CAMERAS_FILE, cameras);
     try {
-      const n = parseInt(session.repeat.replace(/\D/g,""),10)+1;
-      session.repeat = `r${String(n).padStart(2,"0")}`;
+      const n = parseInt(session.repeat.replace(/\D/g, ""), 10) + 1;
+      session.repeat = `r${String(n).padStart(2, "0")}`;
       writeJson(SESSION_FILE, session);
     } catch {}
-    addLog("REC",`Stopped after ${duration}s → ${session.recordDir}/`,"success");
-    res.json({ok:true, duration, newRepeat:session.repeat});
+    addLog("REC", `Stopped after ${duration}s → ${session.recordDir}/`, "success");
+    res.json({ ok: true, duration, newRepeat: session.repeat, files });
   });
 
-  app.get("/api/recording/status", (_req,res) => {
-    const elapsed = isRecording&&recordingStartTime ? Math.round((Date.now()-recordingStartTime)/1000) : 0;
-    res.json({recording:isRecording, elapsed, session});
+  app.get("/api/recording/files", async (_req: Request, res: Response) => {
+    const cameraNames = cameras.filter(c => c.enabled).map(c => c.name);
+    const files = await getMediaMTXRecordingPaths(cameraNames);
+    res.json({ files });
+  });
+
+  app.get("/api/recording/status", (_req: Request, res: Response) => {
+    const elapsed = isRecording && recordingStartTime ? Math.round((Date.now() - recordingStartTime) / 1000) : 0;
+    const recording_cams = cameras.filter(c => c.status === "recording").map(c => ({ name: c.name, ip: c.ip }));
+    res.json({ recording: isRecording, elapsed, session, cameras: recording_cams });
   });
 
   app.post("/api/snapshot", (_req,res) => {
@@ -314,7 +371,7 @@ async function startServer() {
   app.get("/api/logs", (_req,res) => res.json(logs.slice(0,50)));
 
   // ── Addon management ────────────────────────────────────────────────────────
-  const loadedAddons: Map<string, unknown> = new Map();
+  const loadedAddons: Map<string, LoadedAddonEntry> = new Map();
   const disabledAddons: Set<string> = new Set();
 
   const ADDONS_DIR = path.join(process.cwd(), "addons");
@@ -356,34 +413,38 @@ async function startServer() {
   const _disabled = loadDisabledSet();
   _disabled.forEach(id => disabledAddons.add(id));
 
-  function makeAddonContext(addonId: string): AddonContext {
+  function makeAddonContext(addonId: string, expressApp: express.Application): AddonContext {
+    const configFile = path.join(DATA_DIR, "addons", `${addonId}.json`);
+
+    function loadAddonConfig(): Record<string, unknown> {
+      try {
+        if (fs.existsSync(configFile)) {
+          return JSON.parse(fs.readFileSync(configFile, "utf8")) as Record<string, unknown>;
+        }
+      } catch {}
+      return {};
+    }
+
+    function saveAddonConfig(data: Record<string, unknown>) {
+      fs.mkdirSync(path.dirname(configFile), { recursive: true });
+      fs.writeFileSync(configFile, JSON.stringify(data, null, 2));
+    }
+
     return {
       getCameras: () => cameras,
       registerRoute: (method, routePath, handler) => {
         const fullPath = `/api/addons/${addonId}${routePath}`;
-        if (!disabledAddons.has(addonId)) {
-          (app as any)[method.toLowerCase()](fullPath, handler);
-          addLog("ADDON", `Route registered: ${method} ${fullPath}`);
-        }
+        (expressApp as any)[method.toLowerCase()](fullPath, handler);
+        addLog("ADDON", `${addonId}: registered ${method} ${fullPath}`, "info");
       },
-      log: (msg, level = "info") => addLog(addonId.toUpperCase(), msg, level),
-      getConfig: () => {
-        try {
-          const cfgPath = path.join(DATA_DIR, "addons", `${addonId}.json`);
-          if (fs.existsSync(cfgPath)) return JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-        } catch {}
-        return {};
-      },
+      log: (msg, level = "info") => { addLog(`ADDON:${addonId}`, msg, level); },
+      getConfig: () => loadAddonConfig(),
       setConfig: (patch) => {
-        const cfgPath = path.join(DATA_DIR, "addons", `${addonId}.json`);
-        fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-        const current: Record<string, unknown> = {};
-        try { Object.assign(current, JSON.parse(fs.readFileSync(cfgPath, "utf8"))); } catch {}
-        Object.assign(current, patch);
-        fs.writeFileSync(cfgPath, JSON.stringify(current, null, 2));
+        const current = loadAddonConfig();
+        saveAddonConfig({ ...current, ...patch });
       },
-      emit: (event, data) => addLog("EVENT", `${event}: ${JSON.stringify(data).slice(0, 100)}`),
-      on: (_event, _handler) => {},
+      emit: (event, data) => { addonEventBus.emit(event, { source: addonId, data }); },
+      on: (event, handler) => { addonEventBus.on(event, handler); },
     };
   }
 
@@ -404,8 +465,8 @@ async function startServer() {
       const { default: AddonClass } = await import(entryPath);
       const instance = new AddonClass();
       if (typeof instance.init === "function") {
-        await instance.init(makeAddonContext(manifest.id));
-        loadedAddons.set(manifest.id, instance);
+        await instance.init(makeAddonContext(manifest.id, app));
+        loadedAddons.set(manifest.id, { instance, manifest, enabled: true });
         addLog("ADDON", `Loaded: ${manifest.name} v${manifest.version}`, "success");
         return true;
       }
@@ -439,11 +500,12 @@ async function startServer() {
   }
 
   // ── Addon REST endpoints ──────────────────────────────────────────────────
-  app.get("/api/addons", (_req, res) => {
-    const list = Array.from(loadedAddons.keys()).map(id => ({
+  app.get("/api/addons", (_req: Request, res: Response) => {
+    const list = Array.from(loadedAddons.entries()).map(([id, entry]) => ({
       id,
-      isRunning: true,
-      enabled: !disabledAddons.has(id),
+      name: (entry.manifest.name as string) ?? id,
+      version: (entry.manifest.version as string) ?? "0.0.0",
+      enabled: entry.enabled,
     }));
     res.json(list);
   });
@@ -531,6 +593,34 @@ async function startServer() {
     await unloadAddon(req.params.id);
     addLog("ADDON", `Disabled: ${req.params.id}`, "warn");
     res.json({ ok: true });
+  });
+
+  app.get("/api/addons/:id/config", (req: Request, res: Response) => {
+    const entry = loadedAddons.get(req.params.id);
+    if (!entry) { res.status(404).json({ error: "Addon not found" }); return; }
+    const configFile = path.join(DATA_DIR, "addons", `${req.params.id}.json`);
+    try {
+      const cfg = fs.existsSync(configFile)
+        ? JSON.parse(fs.readFileSync(configFile, "utf8"))
+        : {};
+      res.json(cfg);
+    } catch { res.json({}); }
+  });
+
+  app.put("/api/addons/:id/config", (req: Request, res: Response) => {
+    const entry = loadedAddons.get(req.params.id);
+    if (!entry) { res.status(404).json({ error: "Addon not found" }); return; }
+    const configFile = path.join(DATA_DIR, "addons", `${req.params.id}.json`);
+    let current: Record<string, unknown> = {};
+    try {
+      if (fs.existsSync(configFile))
+        current = JSON.parse(fs.readFileSync(configFile, "utf8"));
+    } catch {}
+    const updated = { ...current, ...(req.body as Record<string, unknown>) };
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(configFile, JSON.stringify(updated, null, 2));
+    addLog("ADDON", `Config updated: ${req.params.id}`, "info");
+    res.json(updated);
   });
 
   loadAllAddons();
