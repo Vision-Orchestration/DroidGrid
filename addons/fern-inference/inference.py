@@ -17,6 +17,10 @@ def parse_args():
     p.add_argument("--stride",      type=int, default=15)
     p.add_argument("--confidence",  type=float, default=0.6)
     p.add_argument("--smoothing_n", type=int, default=5)
+    p.add_argument("--sync_offset_sec", type=float, default=0.0,
+                   help="Seconds to discard from stream start before counting "
+                        "inference frames. Should match recording_assistant "
+                        "sync_delay_sec + pre_start_sec (default 0).")
     return p.parse_args()
 
 LOWER_BODY_INDICES = [23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
@@ -81,6 +85,19 @@ def run(args):
             time.sleep(0.033)
             continue
 
+        # ── Sync offset: discard frames from stream start ──
+        if args.sync_offset_sec > 0 and frame_idx == 0:
+            _sync_frames = round(args.sync_offset_sec * 30)
+            _skipped = 0
+            while _skipped < _sync_frames:
+                r2, _ = cap.read()
+                if r2:
+                    _skipped += 1
+                else:
+                    time.sleep(0.010)
+            frame_idx = 0
+            print(f"[sync] Skipped {_skipped} frames ({args.sync_offset_sec}s)", flush=True)
+
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = detector.detect_for_video(mp_img, int(frame_idx * 33.33))
@@ -112,11 +129,13 @@ def run(args):
 
         if conf >= args.confidence:
             event = {
-                "gesture":    CLASSES[smoothed],
-                "confidence": conf,
-                "raw_pred":   CLASSES[pred],
-                "probs":      probs.tolist(),
-                "timestamp":  time.time(),
+                "gesture":               CLASSES[smoothed],
+                "confidence":            conf,
+                "raw_pred":              CLASSES[pred],
+                "probs":                 probs.tolist(),
+                "timestamp":             time.time(),
+                "stream_frame":          frame_idx,
+                "inference_frame_start": frame_idx - args.window_size,
             }
             print(json.dumps(event), flush=True)
 

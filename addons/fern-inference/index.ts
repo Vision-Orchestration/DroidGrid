@@ -87,6 +87,7 @@ export default class FernInferenceAddon implements DroidGridAddon {
       "--stride",       String(cfg.stride ?? 15),
       "--confidence",   String(cfg.confidence ?? 0.6),
       "--smoothing_n",  String(cfg.smoothing_n ?? 5),
+      "--sync_offset_sec", String(cfg.sync_offset_sec ?? 4.0),
     ];
 
     this.ctx.log(`Spawning: python ${args.join(" ")}`, "info");

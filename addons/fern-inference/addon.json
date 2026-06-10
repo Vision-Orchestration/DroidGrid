@@ -15,7 +15,8 @@
     "window_size":    { "type": "number",  "default": 60, "description": "Sliding window of frames for inference" },
     "stride":         { "type": "number",  "default": 15, "description": "Stride between inference windows" },
     "confidence":     { "type": "number",  "default": 0.6, "description": "Minimum confidence threshold to emit gesture event" },
-    "smoothing_n":    { "type": "number",  "default": 5, "description": "Number of predictions to smooth via majority vote" }
+    "smoothing_n":    { "type": "number",  "default": 5, "description": "Number of predictions to smooth via majority vote" },
+    "sync_offset_sec": { "type": "number",  "default": 4.0, "description": "Seconds to skip at stream start. Set to sync_delay_sec + pre_start_sec (default 1.0 + 3.0 = 4.0)." }
   },
   "ui": {
     "panel": true,

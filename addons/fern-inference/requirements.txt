@@ -1,0 +1,7 @@
+# DroidGrid vnf-decoder — Python dependencies
+# For GPU inference swap onnxruntime → onnxruntime-gpu
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+onnxruntime>=1.17.0
+mediapipe>=0.10.14
+requests>=2.31.0

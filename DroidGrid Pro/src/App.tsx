@@ -11,6 +11,7 @@ import {
   AlertCircle, Loader, Edit2, Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { CameraCell } from './components/CameraCell';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 interface Camera {
@@ -77,6 +78,7 @@ export default function App() {
 
   // ── server state ─────────────────────────────────────────────────────────
   const [cameras, setCameras]       = useState<Camera[]>([]);
+  const [mediamtxBase, setMediamtxBase] = useState<string>("http://localhost:8889");
   const [profiles, setProfiles]     = useState<Profile[]>([]);
   const [session, setSession]       = useState<SessionState>({ label:'session', person:'p01', repeat:'r01', pattern:'{label}_{person}_{repeat}_{camera}', recordDir:'recordings', snapDir:'snapshots' });
   const [logs, setLogs]             = useState<LogEntry[]>([]);
@@ -87,6 +89,10 @@ export default function App() {
   const [lastSnap, setLastSnap]     = useState<string[]>([]);
   const [toast, setToast]           = useState<{msg:string;ok:boolean}|null>(null);
   const [addons, setAddons]         = useState<AddonManifest[]>([]);
+  const [showLive, setShowLive] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveredCams, setDiscoveredCams] = useState<Array<{ address: string; name?: string; rtsp_url?: string }>>([]);
+  const [showDiscoverModal, setShowDiscoverModal] = useState(false);
   const recTimer = useRef<ReturnType<typeof setInterval>|null>(null);
 
   const showToast = (msg: string, ok = true) => {
@@ -130,12 +136,13 @@ export default function App() {
   // ── fetch all state ───────────────────────────────────────────────────────
   const refresh = useCallback(async () => {
     try {
-      const [cams, prof, sess, logsData, recStatus] = await Promise.all([
+      const [cams, prof, sess, logsData, recStatus, health] = await Promise.all([
         api.get('/api/cameras'),
         api.get('/api/profiles'),
         api.get('/api/session'),
         api.get('/api/logs'),
         api.get('/api/recording/status'),
+        api.get('/api/health'),
       ]);
       setCameras(cams);
       setProfiles(prof.profiles || []);
@@ -143,6 +150,7 @@ export default function App() {
       setLogs(logsData);
       setRecording(recStatus.recording);
       if (recStatus.recording) setRecElapsed(recStatus.elapsed);
+      if (health?.mediamtxBase) setMediamtxBase(health.mediamtxBase);
       setIsLoading(false);
     } catch (e) {
       console.error('Backend sync failed:', e);
@@ -258,6 +266,21 @@ export default function App() {
     showToast(`Profile "${name}" deleted`, false);
   };
 
+  const discoverCameras = async () => {
+    setDiscovering(true);
+    try {
+      const r = await api.post('/api/cameras/discover');
+      if (r.ok && Array.isArray(r.found)) {
+        setDiscoveredCams(r.found);
+        setShowDiscoverModal(true);
+      } else {
+        showToast(r.error || 'No ONVIF cameras found', false);
+      }
+    } catch {
+      showToast('Discovery failed — is onvif-zeep installed?', false);
+    } finally { setDiscovering(false); }
+  };
+
   const onlineCount  = cameras.filter(c=>c.status==='online'||c.status==='recording').length;
   const enabledCount = cameras.filter(c=>c.enabled).length;
 
@@ -338,17 +361,36 @@ export default function App() {
         </div>
       </BentoCard>
 
-      {/* Camera grid status */}
-      <BentoCard className="md:col-span-4 md:row-span-1 flex-row items-center gap-5">
-        <div className="flex gap-2 flex-wrap">
-          {cameras.map(c => (
-            <div key={c.id} title={`${c.name} (${c.ip})`}
-              className="flex items-center gap-1.5 bg-black/30 border border-surface-border px-2 py-1 rounded-lg text-[10px]">
-              <StatusDot status={c.status} />
-              <span className="text-text-muted font-mono">{c.name}</span>
+      {/* Live Camera Grid */}
+      <BentoCard className="md:col-span-4 md:row-span-1" sub="LIVE FEEDS">
+        <div className="grid grid-cols-3 gap-2 w-full">
+          {cameras.filter(c => c.enabled).slice(0, 6).map(cam => (
+            <div key={cam.id} className="relative rounded-lg overflow-hidden bg-black aspect-video">
+              {(cam.status === 'online' || cam.status === 'recording') ? (
+                <CameraCell
+                  camName={cam.name.toLowerCase().replace(/[\s_]+/g, '-')}
+                  mediamtxBase={mediamtxBase}
+                  isRecording={cam.status === 'recording'}
+                  status={cam.status}
+                  label={cam.name}
+                />
+              ) : (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
+                  <StatusDot status={cam.status} />
+                  <span className="text-[9px] font-mono text-text-dim uppercase">{cam.name}</span>
+                  <span className="text-[8px] text-text-dim/60">{cam.status}</span>
+                </div>
+              )}
+              {cam.status === 'recording' && (
+                <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              )}
             </div>
           ))}
-          {cameras.length===0 && <span className="text-text-dim text-xs">No cameras configured</span>}
+          {cameras.filter(c => c.enabled).length === 0 && (
+            <div className="col-span-3 text-center py-4 text-text-dim text-xs">
+              No cameras enabled
+            </div>
+          )}
         </div>
       </BentoCard>
 
@@ -499,16 +541,52 @@ export default function App() {
             <div>
               <h3 className="text-sm font-bold text-white uppercase tracking-widest">Camera Fleet</h3>
               <p className="text-[10px] text-text-dim mt-0.5">{onlineCount}/{cameras.length} online · {enabledCount} enabled</p>
+              <button
+                onClick={() => setShowLive(v => !v)}
+                className={`mt-1 text-[9px] px-2 py-0.5 rounded border transition-all font-mono uppercase ${showLive ? 'border-brand/40 text-brand bg-brand/5' : 'border-surface-border text-text-dim hover:text-white'}`}
+              >
+                {showLive ? '▣ Hide Live' : '▷ Show Live'}
+              </button>
             </div>
             <div className="flex gap-2">
               <button onClick={testAll} className="flex items-center gap-1.5 bg-surface-border/50 text-text-muted hover:text-white border border-surface-border px-3 py-1.5 rounded-lg text-xs transition-all">
                 <RefreshCw size={12}/> Test All
+              </button>
+              <button
+                onClick={discoverCameras}
+                disabled={discovering}
+                className="flex items-center gap-1.5 bg-surface-border/50 text-text-muted hover:text-white border border-surface-border px-3 py-1.5 rounded-lg text-xs transition-all disabled:opacity-40"
+              >
+                {discovering ? <Loader size={12} className="animate-spin"/> : <Search size={12}/>}
+                {discovering ? 'Scanning...' : 'Discover ONVIF'}
               </button>
               <button onClick={addCamera} className="flex items-center gap-1.5 bg-brand/10 text-brand hover:bg-brand/20 border border-brand/20 px-3 py-1.5 rounded-lg text-xs font-bold transition-all">
                 <Plus size={12}/> Add Camera
               </button>
             </div>
           </div>
+          {showLive && cameras.some(c => c.status === 'online' || c.status === 'recording') && (
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              {cameras
+                .filter(c => c.enabled && (c.status === 'online' || c.status === 'recording'))
+                .map(cam => (
+                  <div key={cam.id}
+                    className="relative rounded-lg overflow-hidden bg-black aspect-video border border-surface-border">
+                    <CameraCell
+                      camName={cam.name.toLowerCase().replace(/[\s_]+/g, '-')}
+                      mediamtxBase={mediamtxBase}
+                      isRecording={cam.status === 'recording'}
+                      status={cam.status}
+                      label={cam.name}
+                    />
+                    <div className="absolute bottom-0 left-0 right-0 px-2 py-1 bg-black/60 text-[9px] font-mono text-text-muted">
+                      {cam.name}
+                    </div>
+                  </div>
+                ))
+              }
+            </div>
+          )}
           <div className="flex flex-col gap-3">
             <AnimatePresence>
               {cameras.map(cam => <CameraRow key={cam.id} cam={cam}/>)}
@@ -803,6 +881,85 @@ export default function App() {
     </div>
   );
 
+  // ── Discover ONVIF modal ──────────────────────────────────────────────────
+  const DiscoverModal = () => {
+    if (!showDiscoverModal) return null;
+
+    const addDiscovered = async (cam: { address: string; rtsp_url?: string; name?: string }) => {
+      const name = cam.name ?? `ONVIF-${Date.now()}`;
+      const ipMatch = cam.address.match(/https?:\/\/([\d.]+)/);
+      const ip = ipMatch?.[1] ?? cam.address;
+      const added = await api.post('/api/cameras', {
+        name, ip, port: 554, res: [1920, 1080], fps: 25, url: cam.rtsp_url ?? undefined,
+      });
+      setCameras(prev => [...prev, added]);
+      showToast(`Added: ${name}`);
+    };
+
+    return (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+        onClick={() => setShowDiscoverModal(false)}
+      >
+        <motion.div
+          initial={{ scale: 0.9, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          exit={{ scale: 0.9, opacity: 0 }}
+          className="bg-surface-card border border-surface-border rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl"
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="p-8 border-b border-surface-border relative">
+            <button
+              onClick={() => setShowDiscoverModal(false)}
+              className="absolute top-6 right-6 text-text-dim hover:text-white p-2 rounded-full hover:bg-white/5"
+            ><X size={20}/></button>
+            <span className="text-brand text-xs font-mono uppercase tracking-[0.2em] mb-2 block">ONVIF Discovery</span>
+            <h2 className="text-2xl font-black text-white">
+              {discoveredCams.length} Camera{discoveredCams.length !== 1 ? 's' : ''} Found
+            </h2>
+          </div>
+
+          <div className="p-6 max-h-80 overflow-y-auto custom-scrollbar">
+            {discoveredCams.length === 0 ? (
+              <p className="text-text-dim text-sm text-center py-6">No ONVIF cameras found on this network.</p>
+            ) : (
+              <div className="space-y-3">
+                {discoveredCams.map((cam, i) => {
+                  const alreadyAdded = cameras.some(c => c.ip && cam.address.includes(c.ip));
+                  return (
+                    <div key={i}
+                      className="flex items-center justify-between p-3 rounded-xl bg-black/30 border border-surface-border">
+                      <div>
+                        <p className="text-xs text-white font-mono">{cam.name ?? `Camera ${i + 1}`}</p>
+                        <p className="text-[9px] text-text-dim mt-0.5 truncate max-w-[260px]">{cam.address}</p>
+                        {cam.rtsp_url && <p className="text-[9px] text-brand/60 mt-0.5 truncate max-w-[260px]">{cam.rtsp_url}</p>}
+                      </div>
+                      {alreadyAdded ? (
+                        <span className="text-[9px] text-text-dim border border-surface-border px-2 py-1 rounded">Added</span>
+                      ) : (
+                        <button onClick={() => addDiscovered(cam)}
+                          className="text-[9px] px-3 py-1.5 bg-brand/10 text-brand rounded border border-brand/20 hover:bg-brand/20 transition-all">
+                          + Add
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="p-6 border-t border-surface-border">
+            <button onClick={() => setShowDiscoverModal(false)}
+              className="w-full bg-surface-border/50 text-text-dim hover:text-white py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all">
+              Close
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  };
+
   // ── Profile detail modal ───────────────────────────────────────────────────
   const ProfileModal = () => {
     if (!selectedProfile) return null;
@@ -888,6 +1045,7 @@ export default function App() {
 
       {/* Modals */}
       <AnimatePresence>{selectedProfile && <ProfileModal/>}</AnimatePresence>
+      <AnimatePresence>{showDiscoverModal && <DiscoverModal/>}</AnimatePresence>
 
       {/* Toast */}
       <AnimatePresence>
