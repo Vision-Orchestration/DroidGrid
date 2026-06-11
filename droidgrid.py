@@ -43,17 +43,34 @@ log = logging.getLogger("droidgrid")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CONFIGURATION  ─ edit this section before running
+#  CONFIGURATION  ─ loaded from config/cameras.json (or env override)
 # ══════════════════════════════════════════════════════════════════════════════
 
-CAMERAS = [
-    # name        ip / URL                                    W     H    fps
+def _load_cameras():
+    """Load camera list from config/cameras.json with env fallback."""
+    cfg_path = os.environ.get(
+        "DROIDGRID_CAMERA_CONFIG",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "cameras.json"),
+    )
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            return [
+                {"name": c["name"], "ip": c["ip"], "port": c["port"],
+                 "res": tuple(c["res"]), "fps": c["fps"]}
+                for c in json.load(f)["cameras"]
+            ]
+    except (OSError, KeyError, json.JSONDecodeError) as e:
+        print(f"[droidgrid] WARNING: could not load {cfg_path} ({e})", file=sys.stderr)
+        return DEFAULT_CAMERAS
+
+DEFAULT_CAMERAS = [
     {"name": "Phone-1", "ip": "192.168.137.107", "port": 4747, "res": (1280, 720), "fps": 30},
     {"name": "Phone-2", "ip": "192.168.137.226", "port": 4747, "res": (1280, 720), "fps": 30},
     {"name": "Phone-3", "ip": "192.168.137.39",  "port": 4747, "res": (1280, 720), "fps": 30},
     {"name": "Phone-4", "ip": "192.168.137.35",  "port": 4747, "res": (1280, 720), "fps": 30},
     {"name": "Phone-5", "ip": "192.168.137.49",  "port": 4747, "res": (1280, 720), "fps": 30},
 ]
+CAMERAS = _load_cameras()
 
 # Output directories (created automatically)
 RECORD_DIR   = "recordings"

@@ -299,9 +299,10 @@ class LabelTracker:
     """
     Tracks exact frame ranges for each phase.
 
-    Frame numbers are anchored to the moment DroidGrid confirmed recording
-    started, plus any sync_delay. The `_wall_start` is set externally by
-    RecordingAssistant to this confirmed start time.
+    Frame numbers are derived from wall-clock time relative to a known anchor
+    point (set_wall_start). This means every segment's start_frame/end_frame
+    is computed as round((wall_time - wall_start) * fps), making labels
+    deterministic and independent of the order or timing of add() calls.
 
     Each segment stores both frame numbers (for model training) and
     wall-clock seconds relative to recording start (for re-anchoring
@@ -313,38 +314,39 @@ class LabelTracker:
         self.subject_id  = subject_id
         self.camera_id   = camera_id
         self.segments:   list = []
-        self._frame      = 0
-        self._wall_sec   = 0.0       # cumulative seconds from recording start
-        self._wall_start = 0.0       # absolute perf_counter of recording frame 0
+        self._wall_start = 0.0       # absolute time.time() of recording frame 0
         self._checkpoint_cb = None   # called after each gesture completes
 
     def set_wall_start(self, t: float):
-        """Set the absolute time that corresponds to frame 0 of the recording."""
+        """Set the absolute time (time.time()) that corresponds to frame 0."""
         self._wall_start = t
 
-    def add(self, gesture: str, duration_sec: float):
+    def add(self, gesture: str, start_wall: float, end_wall: float):
         """
-        Record a phase as a segment.
+        Record a segment from start_wall to end_wall (absolute time.time() values).
 
-        Uses the NOMINAL duration passed in (not measured wall-clock) so that
-        label boundaries are deterministic regardless of tick jitter. The
-        wall-clock times stored are also nominal (cumulative sums), which gives
-        consistent labels across sessions.
+        Frame numbers are derived from the wall-clock duration relative to
+        _wall_start, which guarantees:
+
+            start_frame = round((start_wall - _wall_start) * fps)
+            end_frame   = round((end_wall   - _wall_start) * fps) - 1
+
+        Segments from different trackers with identical wall_start and
+        identical add() calls produce bit-identical frame ranges.
         """
-        n_frames   = round(duration_sec * self.fps)
-        start_sec  = self._wall_sec
-        end_sec    = self._wall_sec + duration_sec
+        start_sec = start_wall - self._wall_start
+        end_sec   = end_wall   - self._wall_start
+        start_frame = round(start_sec * self.fps)
+        end_frame   = max(start_frame, round(end_sec * self.fps) - 1)
 
         self.segments.append({
-            "gesture":     gesture,
-            "start_frame": self._frame,
-            "end_frame":   self._frame + n_frames - 1,
-            "start_sec":   round(start_sec, 4),
-            "end_sec":     round(end_sec,   4),
-            "duration_sec": round(duration_sec, 4),
+            "gesture":      gesture,
+            "start_frame":  start_frame,
+            "end_frame":    end_frame,
+            "start_sec":    round(start_sec, 4),
+            "end_sec":      round(end_sec,   4),
+            "duration_sec": round(end_sec - start_sec, 4),
         })
-        self._frame    += n_frames
-        self._wall_sec += duration_sec
 
     def notify_gesture_complete(self, gesture: str):
         """Call after all reps of a gesture are done (for checkpoint saves)."""
@@ -353,11 +355,15 @@ class LabelTracker:
 
     @property
     def total_frames(self) -> int:
-        return self._frame
+        if not self.segments:
+            return 0
+        return self.segments[-1]["end_frame"] + 1
 
     @property
     def total_sec(self) -> float:
-        return self._wall_sec
+        if not self.segments:
+            return 0.0
+        return self.segments[-1]["end_sec"]
 
     def build_json(self, video_file: str = "",
                    droidgrid_meta: dict = None,
@@ -402,8 +408,23 @@ class LabelTracker:
         """Save partial labels — called after each gesture for crash recovery."""
         data = self.build_json(video_file="__CHECKPOINT__")
         data["is_checkpoint"] = True
+        data["_wall_start"]   = self._wall_start
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
+
+    @staticmethod
+    def load_checkpoint(path: str) -> "LabelTracker":
+        """Restore a LabelTracker from a checkpoint file (crash recovery)."""
+        with open(path) as f:
+            data = json.load(f)
+        tracker = LabelTracker(
+            fps=data["nominal_fps"],
+            subject_id=data["subject_id"],
+            camera_id=data["camera_id"],
+        )
+        tracker._wall_start = data.get("_wall_start", 0.0)
+        tracker.segments    = data["segments"]
+        return tracker
 
 
 # ─── MAIN APP ────────────────────────────────────────────────────────────────
@@ -446,16 +467,29 @@ class RecordingAssistant:
         self.rep             = 0
         self.phase_end       = 0.0
         self.recording_start = 0.0   # wall-clock when tracker frame 0 corresponds to
+        self._anchor_perf    = 0.0   # time.perf_counter() at wall anchor point
+        self._anchor_wall    = 0.0   # time.time() at wall anchor point
         self._dg_meta        = {}    # from DroidGrid stop response
 
         self._build_ui()
 
+    def _wall_now(self) -> float:
+        """Convert current perf_counter to wall time anchored to recording start."""
+        return self._anchor_wall + (time.perf_counter() - self._anchor_perf)
+
     # ── tracker proxy ───────────────────────────────────────────────────────
 
     def _add_all(self, gesture: str, duration_sec: float):
-        """Add the same segment to every camera's tracker simultaneously."""
+        """Add a segment of duration_sec starting now to every tracker."""
+        phase_start_wall = self._wall_now()
+        phase_end_wall   = phase_start_wall + duration_sec
         for tracker in self.trackers.values():
-            tracker.add(gesture, duration_sec)
+            tracker.add(gesture, phase_start_wall, phase_end_wall)
+
+    def _add_all_wall(self, gesture: str, wall_start: float, wall_end: float):
+        """Add a segment with explicit wall-clock range to every tracker."""
+        for tracker in self.trackers.values():
+            tracker.add(gesture, wall_start, wall_end)
 
     def _save_checkpoint(self, gesture: str):
         """Crash-recovery checkpoint after each gesture completes."""
@@ -618,7 +652,7 @@ class RecordingAssistant:
         self.lbl_timer.config(text=dots)
 
         if not self.args.no_droidgrid:
-            confirmed = self.dg.wait_for_recording(timeout_sec=0.0)  # single poll
+            confirmed = self.dg.wait_for_recording(timeout_sec=5.0)
         else:
             confirmed = True   # no DroidGrid — proceed immediately
 
@@ -632,13 +666,20 @@ class RecordingAssistant:
             sync_delay = TIMING["sync_delay_sec"]
             self._recording_confirmed_at = time.perf_counter()
 
-            # Anchor all trackers: frame 0 starts NOW (after sync_delay will be added)
+            # M9: Anchor all trackers at the moment sync_delay begins.
+            # Both perf_counter and time.time() are captured so _wall_now()
+            # can convert future perf_counter readings back to wall time.
+            anchor_wall = time.time()
+            self._anchor_wall = anchor_wall
+            self._anchor_perf = time.perf_counter()
             for tracker in self.trackers.values():
-                tracker.set_wall_start(self._recording_confirmed_at)
+                tracker.set_wall_start(anchor_wall)
 
-            # Add sync_delay as foot_hold BEFORE pre_start
-            self._add_all("foot_hold", sync_delay)
-            self._add_all("foot_hold", TIMING["pre_start_sec"])
+            # Add sync_delay + pre_start as contiguous foot_hold segments.
+            # Using explicit wall times ensures no overlap or gap.
+            t0 = anchor_wall
+            self._add_all_wall("foot_hold", t0, t0 + sync_delay)
+            self._add_all_wall("foot_hold", t0 + sync_delay, t0 + sync_delay + TIMING["pre_start_sec"])
 
             # Wall-clock anchor for the session timer
             self.recording_start  = self._recording_confirmed_at
@@ -770,11 +811,15 @@ class RecordingAssistant:
 
     def _finish_session(self):
         self.state  = self.STATE_DONE
-        elapsed     = time.perf_counter() - self.recording_start
-        dg_meta     = self.dg.stop_recording()
+        self._elapsed     = time.perf_counter() - self.recording_start
+        self._dg_meta     = self.dg.stop_recording()
 
         # Give MediaMTX 500ms to finalise files before querying paths
-        time.sleep(0.5)
+        self.root.after(500, self._finish_session_step2)
+
+    def _finish_session_step2(self):
+        elapsed     = self._elapsed
+        dg_meta     = self._dg_meta
         mediamtx_files = self.dg.get_mediamtx_recording_paths(self.camera_names)
 
         # Get actual fps per camera from DroidGrid
@@ -787,7 +832,6 @@ class RecordingAssistant:
         saved_paths = []
 
         for cam_name, tracker in self.trackers.items():
-            # Determine video file path
             video_file = (
                 mediamtx_files.get(cam_name)
                 or dg_meta.get("files", {}).get(cam_name)
@@ -795,7 +839,6 @@ class RecordingAssistant:
             )
             actual_fps = fps_map.get(cam_name, self.fps)
 
-            # Filename for the label JSON matches the video stem
             video_stem = Path(video_file).stem if video_file else f"{self.subject_id}_{cam_name}_{ts}"
             json_path  = out_dir / f"{video_stem}.json"
 
@@ -807,10 +850,13 @@ class RecordingAssistant:
             )
             saved_paths.append(json_path)
 
-        # Clean up checkpoints now that session completed successfully
-        if self.checkpoint_dir.exists():
-            for cp in self.checkpoint_dir.glob("*.json"):
-                cp.unlink(missing_ok=True)
+        # M10: Verify all files exist before deleting checkpoints
+        if all(p.exists() and p.stat().st_size > 0 for p in saved_paths):
+            if self.checkpoint_dir.exists():
+                for cp in self.checkpoint_dir.glob("*.json"):
+                    cp.unlink(missing_ok=True)
+        else:
+            print("[WARNING] Some label files may be empty — keeping checkpoints", file=sys.stderr)
 
         # UI update
         first_tracker = list(self.trackers.values())[0]
@@ -844,8 +890,32 @@ class RecordingAssistant:
                 return
         self.root.destroy()
 
+    def emergency_save(self):
+        """Crash recovery: persist trackers and stop server recording."""
+        print("[assistant] CRASH — attempting emergency save", file=sys.stderr)
+        try:
+            if hasattr(self, 'trackers') and self.trackers:
+                self._save_checkpoint("CRASH")
+            print("[assistant] checkpoint saved", file=sys.stderr)
+        except Exception as e:
+            print(f"[assistant] checkpoint save failed: {e}", file=sys.stderr)
+        try:
+            if self.dg.enabled:
+                self.dg.stop_recording()
+                print("[assistant] server recording stopped", file=sys.stderr)
+        except Exception as e:
+            print(f"[assistant] could not stop recording: {e}", file=sys.stderr)
+
     def run(self):
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            pass
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            self.emergency_save()
+            sys.exit(1)
 
 
 # ─── ENTRY POINT ─────────────────────────────────────────────────────────────

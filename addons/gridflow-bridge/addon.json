@@ -7,7 +7,7 @@
   "entry": "index.ts",
   "permissions": ["cameras.read", "recording.events", "api.register", "ui.panel"],
   "config": {
-    "endpoint":       { "type": "string",  "default": "http://localhost:8100", "description": "GridFlow service base URL" },
+    "endpoint":       { "type": "string",  "default": "", "description": "GridFlow service base URL (empty = disabled)" },
     "api_key":        { "type": "string",  "default": "", "description": "API key for GridFlow authentication" },
     "stream_mode":    { "type": "string",  "default": "metadata", "enum": ["metadata", "frames", "events"], "description": "What to stream to GridFlow" },
     "batch_interval": { "type": "number",  "default": 5, "description": "Seconds between batch uploads" },

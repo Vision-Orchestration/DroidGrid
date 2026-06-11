@@ -18,6 +18,9 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@gridflow-bridge/*": [
+        "../addons/gridflow-bridge/*"
       ]
     },
     "allowImportingTsExtensions": true,

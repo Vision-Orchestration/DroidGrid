@@ -9,6 +9,9 @@ import os from "os";
 import http from "http";
 import { EventEmitter } from "events";
 import { fileURLToPath } from "url";
+import { authMiddleware, loginHandler } from "./src-server/auth.js";
+import { rateLimit } from "./src-server/rate-limit.js";
+import { attachWsHub } from "./src-server/ws-hub.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR      = path.join(os.homedir(), ".droidgrid");
@@ -16,6 +19,15 @@ const PROFILES_FILE = path.join(DATA_DIR, "profiles.json");
 const CAMERAS_FILE  = path.join(DATA_DIR, "cameras.json");
 const SESSION_FILE  = path.join(DATA_DIR, "session.json");
 fs.mkdirSync(DATA_DIR, { recursive: true });
+
+// H7: safe path resolution — prevent path traversal via session.recordDir / snapDir
+function safeResolveDir(userPath: string): string {
+  const resolved = path.resolve(DATA_DIR, userPath);
+  if (!resolved.startsWith(path.resolve(DATA_DIR))) {
+    throw new Error(`Path traversal blocked: ${userPath}`);
+  }
+  return resolved;
+}
 
 // MediaMTX integration
 const MEDIAMTX_API = "http://localhost:9997/v3";
@@ -68,11 +80,30 @@ interface AddonContext {
   on(event: string, handler: (data: unknown) => void): void;
 }
 
-let cameras: Camera[] = readJson<Camera[]>(CAMERAS_FILE, [
-  { id:"cam-1", name:"Phone-1", ip:"192.168.137.101", port:4747, res:[1280,720], fps:30, enabled:true,  status:"offline" },
-  { id:"cam-2", name:"Phone-2", ip:"192.168.137.102", port:4747, res:[1280,720], fps:30, enabled:true,  status:"offline" },
-  { id:"cam-3", name:"Phone-3", ip:"192.168.137.103", port:4747, res:[1280,720], fps:30, enabled:false, status:"offline" },
-]);
+const DEFAULT_CAMERAS: Camera[] = (() => {
+  try {
+    const cfgPath = path.join(__dirname, "..", "config", "cameras.json");
+    if (fs.existsSync(cfgPath)) {
+      const raw = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+      return raw.cameras.map((c: Record<string, unknown>, i: number) => ({
+        id: String(c.id ?? `cam-${i + 1}`),
+        name: String(c.name ?? `Phone-${i + 1}`),
+        ip: String(c.ip),
+        port: Number(c.port) || 4747,
+        res: (c.res as [number, number]) ?? [1280, 720],
+        fps: Number(c.fps) || 30,
+        enabled: true,
+        status: "offline" as const,
+      }));
+    }
+  } catch {}
+  return [
+    { id:"cam-1", name:"Phone-1", ip:"192.168.137.107", port:4747, res:[1280,720] as [number,number], fps:30, enabled:true,  status:"offline" as const },
+    { id:"cam-2", name:"Phone-2", ip:"192.168.137.226", port:4747, res:[1280,720] as [number,number], fps:30, enabled:true,  status:"offline" as const },
+    { id:"cam-3", name:"Phone-3", ip:"192.168.137.39",  port:4747, res:[1280,720] as [number,number], fps:30, enabled:false, status:"offline" as const },
+  ];
+})();
+let cameras: Camera[] = readJson<Camera[]>(CAMERAS_FILE, DEFAULT_CAMERAS);
 let profiles: Record<string, Profile> = readJson(PROFILES_FILE, {});
 let lastProfileId: string|null = null;
 let session: SessionState = readJson<SessionState>(SESSION_FILE, {
@@ -157,6 +188,16 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
   app.use(express.json());
+
+  // ── Auth ───────────────────────────────────────────────────────────────
+  app.post("/api/auth/login", loginHandler);
+  app.use(authMiddleware);
+
+  // M1: Rate limiting on API routes (60 req/min per IP)
+  app.use("/api", (req, res, next) => {
+    if (rateLimit(req as any, res as any)) return;
+    next();
+  });
 
   app.get("/api/health", (_req,res) => res.json({
     status:"ok", version:"2.4.0-pro", uptime:process.uptime(),
@@ -640,18 +681,20 @@ async function startServer() {
     app.get("*",(_req,res)=>res.sendFile(path.join(distPath,"index.html")));
   }
 
-  app.listen(PORT,"0.0.0.0",() => {
+  const httpServer = app.listen(PORT,"0.0.0.0",() => {
     console.log(`\n╔══════════════════════════════════════╗`);
     console.log(`║  DroidGrid Pro — http://localhost:${PORT} ║`);
     console.log(`║  Config: ${DATA_DIR.slice(0,26).padEnd(26)}  ║`);
     console.log(`╚══════════════════════════════════════╝\n`);
   });
 
+  attachWsHub(httpServer, addonEventBus, {});
+
   // ── Storage retention cleanup ─────────────────────────────────────────────
   function pruneOldRecordings() {
     try {
       const cutoff = Date.now() - RETENTION_DAYS * 86400 * 1000;
-      const recordDir = session.recordDir || "recordings";
+      const recordDir = safeResolveDir(session.recordDir || "recordings");
       if (!fs.existsSync(recordDir)) return;
       fs.readdirSync(recordDir, { withFileTypes: true })
         .filter(e => e.isFile() && e.name.endsWith(".mp4"))

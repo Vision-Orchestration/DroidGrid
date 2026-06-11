@@ -3,15 +3,7 @@
  * Bridges DroidGrid camera data to external GridFlow pipelines.
  * Periodically syncs camera state, recordings metadata, and gesture
  * events to a configurable GridFlow endpoint.
- *
- * API routes (auto-prefixed /api/addons/gridflow-bridge/):
- *   GET  /status     → { connected: bool, lastSync: string, pending: number }
- *   POST /sync       → trigger an immediate sync
- *   GET  /config     → current configuration
- *   PUT  /config     → update configuration
- *   POST /export     → export current data as configured format
  */
-
 interface AddonContext {
   getCameras(): any[];
   registerRoute(method: "GET"|"POST"|"PUT"|"DELETE", path: string, handler: Function): void;
@@ -28,12 +20,18 @@ interface DroidGridAddon {
   destroy(): Promise<void>;
 }
 
+import { createForwarder, type Forwarder, type SendEventsFn } from "./forwarder.js";
+
+const RETRY_OPTIONS = { retries: 3, baseDelayMs: 500 };
+const MAX_QUEUE = 100;
+
 export default class GridFlowBridgeAddon implements DroidGridAddon {
   id = "gridflow-bridge";
   private ctx!: AddonContext;
   private syncTimer: ReturnType<typeof setInterval> | null = null;
   private lastSync: string | null = null;
   private exportFormat: string = "json";
+  private forwarder!: Forwarder;
 
   async init(ctx: AddonContext) {
     this.ctx = ctx;
@@ -42,11 +40,19 @@ export default class GridFlowBridgeAddon implements DroidGridAddon {
     const cfg = ctx.getConfig();
     this.exportFormat = String(cfg.export_format ?? "json");
 
+    // Create forwarder with fetch as the sendEvents function
+    this.forwarder = createForwarder(this._makeSendEvents(), {
+      maxQueue: MAX_QUEUE,
+      ...RETRY_OPTIONS,
+    });
+
     ctx.registerRoute("GET", "/status", (_req: any, res: any) => {
       res.json({
         connected: this.syncTimer !== null,
         lastSync: this.lastSync,
-        endpoint: ctx.getConfig().endpoint ?? "not configured",
+        endpoint: this.isConfigured() ? ctx.getConfig().endpoint : "not configured",
+        queueLength: this.forwarder.queue.length,
+        droppedEvents: this.forwarder.droppedEvents,
       });
     });
 
@@ -77,11 +83,51 @@ export default class GridFlowBridgeAddon implements DroidGridAddon {
     });
 
     ctx.on("fern:gesture", (event: any) => {
-      this.forwardEvent("gesture", event);
+      this.enqueueEvent("gesture", event);
     });
 
     this.startSync();
     ctx.log("GridFlow Bridge routes registered", "info");
+  }
+
+  private isConfigured(): boolean {
+    const ep = this.ctx.getConfig().endpoint;
+    return typeof ep === "string" && ep.length > 0 && this.ctx.getConfig().enabled !== false;
+  }
+
+  private _makeSendEvents(): SendEventsFn {
+    return async (batch: unknown[]) => {
+      const endpoint = this.ctx.getConfig().endpoint as string;
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 5000);
+      try {
+        const res = await fetch(`${endpoint}/api/droidgrid/events`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(this.ctx.getConfig().api_key ? { Authorization: `Bearer ${this.ctx.getConfig().api_key}` } : {}),
+          },
+          body: JSON.stringify({ events: batch }),
+          signal: ac.signal,
+        });
+        clearTimeout(timer);
+        if (res.ok) return true;
+        if (res.status >= 400 && res.status < 500 && res.status !== 429) {
+          this.ctx.log(`GridFlow event rejected (${res.status}), dropping batch`, "warn");
+          return true;
+        }
+        return false;
+      } catch (err) {
+        clearTimeout(timer);
+        throw err;
+      }
+    };
+  }
+
+  private enqueueEvent(type: string, data: unknown) {
+    if (!this.isConfigured()) return;
+    this.forwarder.enqueue({ type, data, timestamp: new Date().toISOString() });
+    this.forwarder.flush();
   }
 
   private startSync() {
@@ -106,13 +152,8 @@ export default class GridFlowBridgeAddon implements DroidGridAddon {
         source: "droidgrid",
         timestamp: new Date().toISOString(),
         cameras: cameras.map((c: any) => ({
-          id: c.id,
-          name: c.name,
-          status: c.status,
-          ip: c.ip,
-          port: c.port,
-          fps: c.fps,
-          res: c.res,
+          id: c.id, name: c.name, status: c.status,
+          ip: c.ip, port: c.port, fps: c.fps, res: c.res,
         })),
         stats: {
           total: cameras.length,
@@ -121,18 +162,9 @@ export default class GridFlowBridgeAddon implements DroidGridAddon {
         },
       };
 
-      if (cfg.endpoint && cfg.endpoint !== "http://localhost:8100") {
-        const resp = await fetch(`${cfg.endpoint}/api/droidgrid/sync`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(cfg.api_key ? { "Authorization": `Bearer ${cfg.api_key}` } : {}),
-          },
-          body: JSON.stringify(payload),
-        });
-        if (!resp.ok) {
-          this.ctx.log(`GridFlow sync failed: ${resp.status}`, "warn");
-        }
+      if (this.isConfigured()) {
+        const endpoint = cfg.endpoint as string;
+        await this.forwardWithRetry(`${endpoint}/api/droidgrid/sync`, payload);
       }
 
       this.lastSync = new Date().toISOString();
@@ -141,31 +173,46 @@ export default class GridFlowBridgeAddon implements DroidGridAddon {
     }
   }
 
-  private forwardEvent(type: string, data: any) {
-    const cfg = this.ctx.getConfig();
-    if (!cfg.endpoint || cfg.endpoint === "http://localhost:8100") return;
-    fetch(`${cfg.endpoint}/api/droidgrid/events`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(cfg.api_key ? { "Authorization": `Bearer ${cfg.api_key}` } : {}),
-      },
-      body: JSON.stringify({ type, data, timestamp: new Date().toISOString() }),
-    }).catch(() => {});
+  private async forwardWithRetry(url: string, payload: unknown): Promise<void> {
+    const { retries, baseDelayMs } = RETRY_OPTIONS;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 5000);
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(this.ctx.getConfig().api_key ? { Authorization: `Bearer ${this.ctx.getConfig().api_key}` } : {}),
+          },
+          body: JSON.stringify(payload),
+          signal: ac.signal,
+        });
+        clearTimeout(timer);
+        if (resp.ok) return;
+        if (resp.status >= 400 && resp.status < 500 && resp.status !== 429) {
+          this.ctx.log(`GridFlow endpoint rejected sync (${resp.status})`, "warn");
+          return;
+        }
+        throw new Error(`HTTP ${resp.status}`);
+      } catch (err) {
+        if (attempt === retries) {
+          this.ctx.log(`GridFlow sync failed after ${retries + 1} attempts: ${(err as Error).message}`, "error");
+          return;
+        }
+        await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** attempt));
+      }
+    }
   }
 
   private buildExportPayload(): any {
     const cameras = this.ctx.getCameras();
     return {
       exportedAt: new Date().toISOString(),
-      generator: "droidgrid-gridflow-bridge-v1",
+      generator: "droidgrid-gridflow-bridge-v2",
       cameras: cameras.map((c: any) => ({
-        name: c.name,
-        ip: c.ip,
-        port: c.port,
-        status: c.status,
-        res: c.res,
-        fps: c.fps,
+        name: c.name, ip: c.ip, port: c.port,
+        status: c.status, res: c.res, fps: c.fps,
       })),
       session: null,
     };

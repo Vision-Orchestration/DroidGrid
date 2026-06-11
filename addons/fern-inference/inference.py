@@ -69,78 +69,112 @@ def run(args):
 
     cap = cv2.VideoCapture(args.rtsp_url, cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    if not cap.isOpened():
+        print(json.dumps({"event": "error", "message": f"cannot open {args.rtsp_url}"}), flush=True)
+        sys.exit(1)
 
     frame_buf = collections.deque(maxlen=args.window_size)
     vote_buf  = collections.deque(maxlen=args.smoothing_n)
     frame_idx = 0
     stride_counter = 0
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 90
+
+    # H6: wall-clock stream time tracking
+    stream_t0 = None
+    last_timestamp_ms = -1
 
     one_hot = [0] * args.n_cameras
     if 0 <= args.camera_id < args.n_cameras:
         one_hot[args.camera_id] = 1
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            time.sleep(0.033)
-            continue
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    print(json.dumps({"event": "error", "message": "stream lost"}), flush=True)
+                    break
+                time.sleep(0.010)
+                continue
+            consecutive_failures = 0
 
-        # ── Sync offset: discard frames from stream start ──
-        if args.sync_offset_sec > 0 and frame_idx == 0:
-            _sync_frames = round(args.sync_offset_sec * 30)
-            _skipped = 0
-            while _skipped < _sync_frames:
-                r2, _ = cap.read()
-                if r2:
-                    _skipped += 1
-                else:
-                    time.sleep(0.010)
-            frame_idx = 0
-            print(f"[sync] Skipped {_skipped} frames ({args.sync_offset_sec}s)", flush=True)
+            # ── Sync offset: discard by elapsed wall time, not frame count ──
+            if args.sync_offset_sec > 0 and frame_idx == 0:
+                skip_t0 = time.monotonic()
+                skipped = 0
+                while time.monotonic() - skip_t0 < args.sync_offset_sec:
+                    r2, _ = cap.read()
+                    if r2:
+                        skipped += 1
+                    else:
+                        time.sleep(0.010)
+                frame_idx = 0
+                print(json.dumps({"event": "sync_skip_done", "frames_skipped": skipped,
+                                  "elapsed_sec": round(time.monotonic() - skip_t0, 3)}), flush=True)
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        result = detector.detect_for_video(mp_img, int(frame_idx * 33.33))
-        frame_idx += 1
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
-        if not result.pose_landmarks:
-            continue
+            # H6: Use stream POS_MSEC when available, fall back to wall clock
+            pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+            if pos_ms and pos_ms > 0:
+                timestamp_ms = int(pos_ms)
+            else:
+                if stream_t0 is None:
+                    stream_t0 = time.monotonic()
+                timestamp_ms = int((time.monotonic() - stream_t0) * 1000)
 
-        raw = extract_lower_body(result.pose_landmarks[0], frame.shape[1], frame.shape[0])
-        normalised = normalise(raw)
-        flagged = normalised + one_hot
-        frame_buf.append(flagged)
+            if timestamp_ms <= last_timestamp_ms:
+                timestamp_ms = last_timestamp_ms + 1
+            last_timestamp_ms = timestamp_ms
 
-        if len(frame_buf) < args.window_size:
-            continue
+            result = detector.detect_for_video(mp_img, timestamp_ms)
+            frame_idx += 1
 
-        stride_counter += 1
-        if stride_counter % args.stride != 0:
-            continue
+            if not result.pose_landmarks:
+                continue
 
-        window = np.array(list(frame_buf), dtype=np.float32)[None]
-        logits = sess.run(None, {input_name: window})[0][0]
-        probs  = np.exp(logits) / np.exp(logits).sum()
-        pred   = int(probs.argmax())
-        conf   = float(probs[pred])
+            raw = extract_lower_body(result.pose_landmarks[0], frame.shape[1], frame.shape[0])
+            normalised = normalise(raw)
+            flagged = normalised + one_hot
+            frame_buf.append(flagged)
 
-        vote_buf.append(pred)
-        smoothed = collections.Counter(vote_buf).most_common(1)[0][0]
+            if len(frame_buf) < args.window_size:
+                continue
 
-        if conf >= args.confidence:
-            event = {
-                "gesture":               CLASSES[smoothed],
-                "confidence":            conf,
-                "raw_pred":              CLASSES[pred],
-                "probs":                 probs.tolist(),
-                "timestamp":             time.time(),
-                "stream_frame":          frame_idx,
-                "inference_frame_start": frame_idx - args.window_size,
-            }
-            print(json.dumps(event), flush=True)
+            stride_counter += 1
+            if stride_counter % args.stride != 0:
+                continue
 
-    cap.release()
-    detector.close()
+            window = np.array(list(frame_buf), dtype=np.float32)[None]
+            logits = sess.run(None, {input_name: window})[0][0]
+            probs  = np.exp(logits) / np.exp(logits).sum()
+            pred   = int(probs.argmax())
+            conf   = float(probs[pred])
+
+            vote_buf.append(pred)
+            smoothed = collections.Counter(vote_buf).most_common(1)[0][0]
+
+            if conf >= args.confidence:
+                event = {
+                    "gesture":               CLASSES[smoothed],
+                    "confidence":            conf,
+                    "raw_pred":              CLASSES[pred],
+                    "probs":                 probs.tolist(),
+                    "timestamp":             time.time(),
+                    "stream_frame":          frame_idx,
+                    "inference_frame_start": frame_idx - args.window_size,
+                }
+                print(json.dumps(event), flush=True)
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(json.dumps({"event": "error", "message": str(e)}), flush=True)
+    finally:
+        cap.release()
+        detector.close()
 
 if __name__ == "__main__":
     run(parse_args())

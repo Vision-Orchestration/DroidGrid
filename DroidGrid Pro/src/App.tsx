@@ -39,11 +39,27 @@ interface AddonManifest {
 }
 
 // ── API helpers ───────────────────────────────────────────────────────────────
+function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem('droidgrid_token');
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
+}
+
+function apiFetch(path: string, init?: RequestInit) {
+  const headers = { ...authHeaders(), ...init?.headers } as Record<string, string>;
+  return fetch(path, { ...init, headers }).then(r => {
+    if (r.status === 401) {
+      localStorage.removeItem('droidgrid_token');
+      window.dispatchEvent(new Event('droidgrid:logout'));
+    }
+    return r.json();
+  });
+}
+
 const api = {
-  get:    (path: string) => fetch(path).then(r => r.json()),
-  post:   (path: string, body?: unknown) => fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined }).then(r => r.json()),
-  put:    (path: string, body: unknown)  => fetch(path, { method:'PUT',  headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(r => r.json()),
-  delete: (path: string) => fetch(path, { method:'DELETE' }).then(r => r.json()),
+  get:    (path: string) => apiFetch(path),
+  post:   (path: string, body?: unknown) => apiFetch(path, { method:'POST', headers:{'Content-Type':'application/json'} as Record<string,string>, body: body ? JSON.stringify(body) : undefined }),
+  put:    (path: string, body: unknown)  => apiFetch(path, { method:'PUT',  headers:{'Content-Type':'application/json'} as Record<string,string>, body: JSON.stringify(body) }),
+  delete: (path: string) => apiFetch(path, { method:'DELETE' }),
 };
 
 // ── BentoCard ─────────────────────────────────────────────────────────────────
@@ -94,6 +110,7 @@ export default function App() {
   const [discoveredCams, setDiscoveredCams] = useState<Array<{ address: string; name?: string; rtsp_url?: string }>>([]);
   const [showDiscoverModal, setShowDiscoverModal] = useState(false);
   const recTimer = useRef<ReturnType<typeof setInterval>|null>(null);
+  const recStartRef = useRef(0);
 
   const showToast = (msg: string, ok = true) => {
     setToast({msg, ok});
@@ -152,25 +169,46 @@ export default function App() {
       if (recStatus.recording) setRecElapsed(recStatus.elapsed);
       if (health?.mediamtxBase) setMediamtxBase(health.mediamtxBase);
       setIsLoading(false);
+      backoffRef.current = 1000;
     } catch (e) {
       console.error('Backend sync failed:', e);
+      backoffRef.current = Math.min(backoffRef.current * 1.5, 30000);
     }
   }, []);
 
-  useEffect(() => {
-    refresh();
-    fetchAddons();
-    const iv = setInterval(refresh, 4000);
-    const iv2 = setInterval(fetchAddons, 10000);
-    return () => { clearInterval(iv); clearInterval(iv2); };
+  const backoffRef = useRef(1000);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout>|null>(null);
+
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(async () => {
+      await refresh();
+      scheduleRefresh();
+    }, backoffRef.current);
   }, [refresh]);
 
-  // ── recording timer ───────────────────────────────────────────────────────
+  useEffect(() => {
+    refresh().then(() => {
+      scheduleRefresh();
+    });
+    fetchAddons();
+    const iv2 = setInterval(fetchAddons, 10000);
+    return () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+      clearInterval(iv2);
+    };
+  }, [refresh, scheduleRefresh]);
+
+  // ── recording timer (drift-free) ─────────────────────────────────────────
   useEffect(() => {
     if (recording) {
-      recTimer.current = setInterval(() => setRecElapsed(e => e + 1), 1000);
+      recStartRef.current = Date.now();
+      recTimer.current = setInterval(() => {
+        setRecElapsed(Math.floor((Date.now() - recStartRef.current) / 1000));
+      }, 1000);
     } else {
       if (recTimer.current) clearInterval(recTimer.current);
+      recTimer.current = null;
       setRecElapsed(0);
     }
     return () => { if (recTimer.current) clearInterval(recTimer.current); };
@@ -216,7 +254,7 @@ export default function App() {
 
   // ── recording ─────────────────────────────────────────────────────────────
   const startRec = async () => {
-    const r = await api.post('/api/recording/start');
+    const r = await api.post('/api/recording/start', { subject_id: session.person });
     if (r.ok) { setRecording(true); showToast(`Recording started — ${r.cameras} cameras`); }
     else showToast(r.msg || 'Failed to start', false);
     refresh();

@@ -26,22 +26,36 @@ except ImportError:
 def read_input(path: str) -> list:
     with open(path) as f:
         data = json.load(f)
-    cameras = data.get("cameras", data if isinstance(data, list) else [])
-    return cameras
+    if isinstance(data, list):
+        return data
+    return data.get("cameras", [])
+
+
+def flatten_row(row: dict, prefix: str = "") -> dict:
+    out = {}
+    for k in sorted(row.keys()):
+        v = row[k]
+        key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            out.update(flatten_row(v, key))
+        else:
+            out[key] = v
+    return out
 
 
 def to_csv(data: list, output: str):
     if not data:
         print("No data to convert")
         return
+    flat = [flatten_row(r) for r in data]
     fieldnames = set()
-    for row in data:
+    for row in flat:
         fieldnames.update(row.keys())
     fieldnames = sorted(fieldnames)
     with open(output, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(data)
+        writer.writerows(flat)
     print(f"CSV written: {output} ({len(data)} rows)")
 
 
@@ -75,7 +89,9 @@ def main():
     elif args.format == "parquet":
         to_parquet(data, output)
     else:
-        print(json.dumps(data, indent=2))
+        with open(output, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"JSON written: {output} ({len(data)} rows)")
 
 
 if __name__ == "__main__":
