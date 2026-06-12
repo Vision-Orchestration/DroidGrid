@@ -40,6 +40,33 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
+# ─── PROFILE LOADER ──────────────────────────────────────────────────────────
+
+PROFILE_DIR = Path(__file__).resolve().parent / "config" / "profiles"
+
+
+def load_profile(name: str) -> dict | None:
+    """Load a JSON profile from config/profiles/{name}.json."""
+    path = PROFILE_DIR / f"{name}.json"
+    if not path.exists():
+        print(f"[profile] NOT FOUND: {path}", file=sys.stderr)
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def _arg_was_provided(arg_name: str) -> bool:
+    """Check if a CLI flag was explicitly passed by the user."""
+    variants = {f"--{arg_name}", f"--{arg_name.replace('_', '-')}"}
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a in variants:
+            return True
+        if a.startswith("--") and "=" in a:
+            key = a.split("=")[0]
+            if key in variants:
+                return True
+    return False
+
 # ─── CONFIGURATION ────────────────────────────────────────────────────────────
 
 GESTURES_ROUND1 = [
@@ -880,6 +907,55 @@ class RecordingAssistant:
             print(f"Label:    {p}")
         print(f"{'='*60}\n")
 
+        # ── Auto-export to FERN ──────────────────────────────────────────────
+        if self.args.fern_export_dir or self.args.auto_export:
+            self._run_fern_export(mediamtx_files, fps_map, saved_paths)
+
+
+    def _run_fern_export(self, mediamtx_files: dict, fps_map: dict, saved_paths: list):
+        """Run the post-recording FERN export pipeline."""
+        from scripts.fern_export import export_to_fern
+
+        fern_root = self.args.fern_export_dir
+        if not fern_root:
+            fern_root = "C:/fern/FERN_V2"
+
+        # Build video_files dict from MediaMTX paths
+        video_files = {}
+        for cam_name in self.camera_names:
+            vp = mediamtx_files.get(cam_name)
+            if vp and Path(vp).exists():
+                video_files[cam_name] = vp
+
+        # Try to get fern_venv from profile
+        fern_venv = "python"
+        if self.args.profile:
+            profile = load_profile(str(self.args.profile))
+            if profile:
+                fern_venv = profile.get("export", {}).get("fern_venv", "python")
+
+        print(f"\n{'─'*60}")
+        print(f"  FERN Export to: {fern_root}")
+        print(f"{'─'*60}")
+
+        result = export_to_fern(
+            subject     = self.subject_id,
+            label_dir   = self.args.output_dir,
+            fern_root   = fern_root,
+            fern_venv   = fern_venv,
+            video_files = video_files,
+            fps_map     = fps_map,
+            extract_skeletons = True,
+            verbose     = True,
+        )
+
+        if result.get("ok"):
+            s = result["summary"]
+            print(f"  ✓ FERN export complete: {s['labels_exported']} labels, "
+                  f"{s['skeletons_extracted']} skeletons, {s['videos_copied']} videos")
+        else:
+            print(f"  ✗ FERN export had errors (check per-camera results above)")
+
     def _confirm_quit(self):
         if self.state not in [self.STATE_IDLE, self.STATE_DONE]:
             if not messagebox.askyesno(
@@ -941,6 +1017,15 @@ def main():
                    help=f"DroidGrid backend URL (default {DROIDGRID_URL})")
     p.add_argument("--camera_id",     type=int, default=0,
                    help="Legacy: camera_id for label JSON when using single camera")
+    p.add_argument("--profile",       default=None,
+                   help="Config profile name (e.g. fern). Loads defaults from "
+                        "config/profiles/<name>.json")
+    p.add_argument("--fern-export-dir", default=None,
+                   help="FERN project root for auto-export "
+                        "(e.g. C:/fern/FERN_V2). Implies --auto-export")
+    p.add_argument("--auto-export",   action="store_true",
+                   help="Automatically export labels + skeletons to FERN "
+                        "after session ends")
     p.add_argument("--list_gestures", action="store_true",
                    help="Print gesture list and exit")
 
@@ -951,6 +1036,27 @@ def main():
         print("Round 2:", GESTURES_ROUND2)
         print(f"Total: {len(GESTURES_ROUND1) * 2} gestures × {TIMING['reps_per_gesture']} reps")
         return
+
+    # ── Profile merge ────────────────────────────────────────────────────────
+    if args.profile:
+        profile = load_profile(args.profile)
+        if profile is None:
+            print(f"[FATAL] Profile '{args.profile}' could not be loaded.", file=sys.stderr)
+            sys.exit(1)
+        prof_defaults = profile.get("defaults", {})
+        for key, value in prof_defaults.items():
+            arg_key = key.replace("-", "_")
+            if hasattr(args, arg_key) and not _arg_was_provided(arg_key):
+                if arg_key == "cameras" and isinstance(value, list):
+                    setattr(args, arg_key, ",".join(value))
+                else:
+                    setattr(args, arg_key, value)
+        if args.fern_export_dir is None:
+            export_cfg = profile.get("export", {})
+            if export_cfg.get("fern_root"):
+                args.fern_export_dir = export_cfg["fern_root"]
+        print(f"[profile] Loaded '{args.profile}': {len(prof_defaults)} defaults, "
+              f"export={'on' if args.fern_export_dir else 'off'}")
 
     if not HAS_REQUESTS and not args.no_droidgrid:
         print("WARNING: 'requests' not installed. DroidGrid disabled.")

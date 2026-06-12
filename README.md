@@ -1,44 +1,34 @@
-<div align="center">
+![DroidGrid — Multi-Phone Camera Controller](assets/banner.svg)
 
-<img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=28&duration=3000&pause=1000&color=58A6FF&center=true&vCenter=true&width=600&lines=DroidGrid;Multi-Phone+Camera+Controller" alt="DroidGrid" />
+<p align="right">
+  <a href="https://github.com/Vision-Orchestration/FERN"><img src="https://img.shields.io/badge/parent%20project-FERN-3fb950?style=flat-square&logo=python&logoColor=white" alt="FERN"></a>
+</p>
 
-<br/>
-
-**Turn any number of Android phones running DroidCam into a synchronized multi-camera studio — preview, record, and snapshot from a single Python script.**
-
-<br/>
-
-[![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![OpenCV](https://img.shields.io/badge/OpenCV-4.8%2B-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white)](https://opencv.org)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=for-the-badge)](.)
-[![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/luuucciiffeerr/DroidGrid?style=for-the-badge&color=f59e0b)](.)
-
-</div>
+[![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![OpenCV](https://img.shields.io/badge/OpenCV-4.8%2B-5C3EE8?style=flat-square&logo=opencv&logoColor=white)](https://opencv.org)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square)]()
+[![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/badge/Release-v1.0.0-blue?style=flat-square)](https://github.com/Vision-Orchestration/DroidGrid/releases/tag/v1.0.0)
 
 ---
 
-## Overview
+## What is DroidGrid?
 
-DroidGrid is a lightweight desktop controller for [DroidCam](https://www.dev47apps.com/). Connect several Android phones to the same Wi-Fi network, run one script, and you immediately get:
+Turn any number of Android phones running **DroidCam** into a synchronized multi-camera studio — preview, record, and snapshot from a single Python script.
 
-- A **tiled live preview** of all streams in one window
-- **Simultaneous recording** to separate `.mp4` files per camera
-- **Instant JPEG snapshots** from all cameras with one key
-- **Auto-reconnect** when a stream drops or freezes — no babysitting required
-- An **inline session editor** to label recordings without touching the terminal
+No external server. No cloud. No subscriptions. Just phones, Wi-Fi, and Python.
 
-No external server, no cloud, no paid subscriptions. Just phones, Wi-Fi, and Python.
+> **Context** — DroidGrid was built as the data-collection rig for [FERN ↗](https://github.com/Vision-Orchestration/FERN), a real-time foot gesture recognition system. The naming pattern (`{label}_{person}_{repeat}_{camera}`) maps directly to FERN's training pipeline.
 
 ---
 
-## Feature Overview
+## Features
 
 | | Feature | Detail |
-|---|---|---|
-| 📺 | **Live grid preview** | Up to 10 phones in a tiled 3-column layout |
+|:--|:--------|:-------|
+| 📺 | **Live grid preview** | Up to 10 phones in a tiled layout |
 | 🎬 | **Simultaneous recording** | Each camera writes its own `.mp4` independently |
-| 📷 | **Snapshot (T)** | One JPEG per camera, saved instantly |
+| 📷 | **Snapshot** `T` | One JPEG per camera, saved instantly |
 | 🔁 | **Self-healing streams** | Frozen-frame detection via MD5 hash + auto-reconnect |
 | ⚡ | **Non-blocking I/O** | Dedicated write-queue thread per camera |
 | 🏷️ | **Inline session editor** | Change label/person/repeat inside the preview window |
@@ -50,28 +40,32 @@ No external server, no cloud, no paid subscriptions. Just phones, Wi-Fi, and Pyt
 ## Requirements
 
 **On your PC:**
+
 ```bash
 pip install opencv-python numpy
 ```
 
 **On each Android phone:**
+
 - Install [DroidCam](https://play.google.com/store/apps/details?id=com.dev47apps.droidcam) (free)
-- Connect to the same Wi-Fi network as your PC
-- Open DroidCam — the IP address is shown on screen
+- Connect to the same Wi-Fi as your PC
+- Open DroidCam — the IP address appears on screen
 
 ---
 
 ## Quick Start
 
-### 1. Clone
+### 1 — Clone
+
 ```bash
 git clone https://github.com/Vision-Orchestration/DroidGrid.git
 cd DroidGrid
 pip install -r requirements.txt
 ```
 
-### 2. Configure cameras
-Open `droidgrid.py` and edit the `CAMERAS` list at the top:
+### 2 — Configure cameras
+
+Edit the `CAMERAS` list at the top of `droidgrid.py`:
 
 ```python
 CAMERAS = [
@@ -82,32 +76,33 @@ CAMERAS = [
 ]
 ```
 
-> **Performance tip:** For 5+ cameras, use `"fps": 20` and `"res": (960, 540)` for smoother operation on standard hardware.
+> **Performance tip:** For 5+ cameras, use `"fps": 20` and `"res": (960, 540)`.
 
-### 3. Run
+### 3 — Run
+
 ```bash
 python droidgrid.py
 ```
 
-The preview window opens. Connected cameras appear immediately. Disconnected ones show an **OFFLINE** placeholder and reconnect automatically.
+The preview window opens immediately. Connected cameras appear in the grid; offline ones show a placeholder and reconnect automatically.
 
 ---
 
 ## Keyboard Controls
 
 | Key | Action |
-|-----|--------|
+|:---:|:-------|
 | `R` | Start recording on all connected cameras |
-| `S` | Stop recording — files saved, repeat counter auto-advances |
-| `T` | Snapshot — one JPEG per camera saved to `snapshots/` |
-| `G` | Set session label (opens inline prompt) |
+| `S` | Stop recording — files saved, repeat counter advances |
+| `T` | Snapshot — one JPEG per camera → `snapshots/` |
+| `G` | Set session label |
 | `P` | Set person ID |
 | `N` | Set repeat number |
 | `C` | Reconnect all cameras |
 | `H` | Toggle HUD overlay |
 | `Q` | Quit |
 
-All prompts appear **as an overlay inside the preview window** — no terminal input needed.
+All prompts appear **as overlays inside the preview window** — no terminal input needed.
 
 ---
 
@@ -120,16 +115,16 @@ DroidGrid/
 │   ├── walk_p01_r01_Phone-2.mp4
 │   └── walk_p01_r01_Phone-3.mp4
 └── snapshots/
-    ├── walk_p01_r01_Phone-1_20250421_143022.jpg
-    ├── walk_p01_r01_Phone-2_20250421_143022.jpg
-    └── walk_p01_r01_Phone-3_20250421_143022.jpg
+    ├── walk_p01_r01_Phone-1_20260421_143022.jpg
+    ├── walk_p01_r01_Phone-2_20260421_143022.jpg
+    └── walk_p01_r01_Phone-3_20260421_143022.jpg
 ```
 
-Files are **never overwritten** — if a path already exists, a numeric suffix is appended automatically.
+Files are **never overwritten** — a numeric suffix is appended if a path exists.
 
 ### Naming pattern
 
-Configured via `NAMING_PATTERN` in `droidgrid.py`:
+Set via `NAMING_PATTERN` in `droidgrid.py`:
 
 ```python
 NAMING_PATTERN = "{label}_{person}_{repeat}_{camera}"
@@ -142,22 +137,22 @@ Available tokens: `{label}` `{person}` `{repeat}` `{camera}` `{date}` `{time}`
 ## Architecture
 
 ```
-Main thread — UI rendering loop (30 fps display)
+Main thread ─── UI rendering loop (30 fps display)
 │
-├── Camera-1 ──► Capture thread ──► Queue ──► Writer thread ──► .mp4
-├── Camera-2 ──► Capture thread ──► Queue ──► Writer thread ──► .mp4
-├── Camera-3 ──► Capture thread ──► Queue ──► Writer thread ──► .mp4
+├── Camera-1 ──► Capture thread ──► Frame queue ──► Writer thread ──► .mp4
+├── Camera-2 ──► Capture thread ──► Frame queue ──► Writer thread ──► .mp4
+├── Camera-3 ──► Capture thread ──► Frame queue ──► Writer thread ──► .mp4
 └── ...
 ```
 
-**Capture thread** — reads frames, detects freezes, reconnects on failure  
-**Writer thread** — drains the queue to disk, completely independent of display  
-**Main thread** — builds the grid and handles keyboard events only, never blocks on I/O
+**Capture thread** — reads frames, detects freezes, reconnects on failure.  
+**Writer thread** — drains the queue to disk, completely independent of display.  
+**Main thread** — builds the grid and handles keyboard events only; never blocks on I/O.
 
 ### Self-healing logic
 
 | Failure mode | Detection | Response |
-|---|---|---|
+|:-------------|:----------|:---------|
 | Stream drop | `cap.read()` fails 10× | Reconnect after 2 s |
 | Frozen stream | MD5 hash identical for 60+ frames | Immediate reconnect |
 
@@ -168,14 +163,14 @@ Main thread — UI rendering loop (30 fps display)
 All settings live at the top of `droidgrid.py`:
 
 ```python
-RECORD_DIR       = "recordings"                          # video output folder
-SNAPSHOT_DIR     = "snapshots"                           # snapshot output folder
-NAMING_PATTERN   = "{label}_{person}_{repeat}_{camera}"  # file naming tokens
-CELL_W           = 640     # preview cell width (px)
-CELL_H           = 360     # preview cell height (px)
-CODEC            = "mp4v"  # video codec fourcc (mp4v / MJPG / XVID)
-FREEZE_THRESHOLD = 60      # identical frames before reconnect
-RECONNECT_DELAY  = 2.0     # seconds between reconnect attempts
+RECORD_DIR       = "recordings"
+SNAPSHOT_DIR     = "snapshots"
+NAMING_PATTERN   = "{label}_{person}_{repeat}_{camera}"
+CELL_W           = 640      # preview cell width (px)
+CELL_H           = 360      # preview cell height (px)
+CODEC            = "mp4v"   # fourcc: mp4v / MJPG / XVID
+FREEZE_THRESHOLD = 60       # identical frames before reconnect
+RECONNECT_DELAY  = 2.0      # seconds between reconnect attempts
 ```
 
 ---
@@ -183,39 +178,58 @@ RECONNECT_DELAY  = 2.0     # seconds between reconnect attempts
 ## Troubleshooting
 
 **Camera shows OFFLINE immediately**
-- Confirm the IP shown in DroidCam matches the one in `CAMERAS`
-- Confirm both devices are on the same Wi-Fi (not guest network)
-- Check that Windows Firewall / antivirus is not blocking port `4747`
-- Try opening `http://<phone-ip>:4747/mjpegfeed` in a browser — if you see a video, the URL works
+- Confirm the IP in `CAMERAS` matches the one shown in the DroidCam app
+- Confirm both devices are on the same Wi-Fi (not a guest network)
+- Check that Windows Firewall / antivirus isn't blocking port `4747`
+- Verify the stream works: open `http://<phone-ip>:4747/mjpegfeed` in a browser
 
 **Frames are dropping / stream is laggy**
 - Switch to a 5 GHz Wi-Fi network
 - Lower `fps` to `20` and `res` to `(960, 540)` per camera
-- Reduce `CELL_W` / `CELL_H` to decrease display load
+- Reduce `CELL_W` / `CELL_H`
 
 **Video files are empty or won't open**
-- Try changing `CODEC` from `"mp4v"` to `"MJPG"` and use `.avi` extension
+- Change `CODEC` from `"mp4v"` to `"MJPG"` and use a `.avi` extension
 - Check disk space
-
-**Frozen stream not detected**
-- Lower `FREEZE_THRESHOLD` (default `60`) if you want faster detection
-- Higher values reduce false reconnects on slow networks
 
 ---
 
 ## FAQ
 
-**Q: Does it work with RTSP cameras (not just DroidCam)?**  
-Yes. Set `"ip"` to the full RTSP URL and `"port"` to `None`, then adjust the `url` property in the `Camera` class to return `self.ip` directly.
+**Does it work with RTSP cameras (not just DroidCam)?**  
+Yes. Set `"ip"` to the full RTSP URL, `"port"` to `None`, and adjust the `url` property in the `Camera` class to return `self.ip` directly.
 
-**Q: DroidCam free vs paid — which do I need?**  
-The free version works fully. Paid removes the watermark and allows higher resolutions.
+**DroidCam free vs paid — which do I need?**  
+Free works fully. Paid removes the watermark and unlocks higher resolutions.
 
-**Q: How many phones can I use at once?**  
-Tested up to 5 phones at 1280×720 / 30fps on mid-range hardware (RTX 3070 + Ryzen 7). For 10 phones, use 960×540 and 20fps.
+**How many phones can I use at once?**  
+Tested up to 5 phones at 1280×720 / 30 fps on mid-range hardware. For 10 phones, use 960×540 at 20 fps.
 
-**Q: Can I use this for research / dataset collection?**  
-Yes — that's exactly what it was built for. The naming pattern (`{label}_{person}_{repeat}_{camera}`) is designed for structured dataset recording.
+**Can I use this for research / dataset collection?**  
+Yes — that's exactly what it was built for. The naming pattern maps directly to [FERN's](https://github.com/Vision-Orchestration/FERN) training pipeline.
+
+---
+
+## Repository Structure
+
+```
+DroidGrid/
+├── assets/
+│   └── banner.svg
+├── droidgrid.py        # single-file application
+├── requirements.txt
+├── CHANGELOG.md
+├── LICENSE
+└── README.md
+```
+
+---
+
+## Related Projects
+
+| Project | Description |
+|:--------|:------------|
+| [**FERN**](https://github.com/Vision-Orchestration/FERN) | Foot gEsture Recognition Network — the ML system DroidGrid was built to feed. Real-time gesture classification via MediaPipe + CNN-BiLSTM-Attention. |
 
 ---
 
@@ -223,23 +237,25 @@ Yes — that's exactly what it was built for. The naming pattern (`{label}_{pers
 
 Issues and pull requests are welcome.
 
-1. Fork the repo
-2. Create a branch: `git checkout -b feature/my-feature`
-3. Commit your changes with a clear message
-4. Open a pull request
+```bash
+git checkout -b feature/my-feature
+# make changes
+git commit -m "feat: describe your change"
+# open a pull request
+```
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
 ## License
 
-[MIT](LICENSE) — free for personal, academic, and commercial use.
+Released under the [MIT License](LICENSE) — free for personal, academic, and commercial use.
 
 ---
 
-<div align="center">
-
-Part of the [Vision-Orchestration](https://github.com/Vision-Orchestration) toolkit.
-
-*Built with OpenCV. No cloud. No subscriptions. Just cameras.*
-
-</div>
+<sub>Part of the [Vision-Orchestration](https://github.com/Vision-Orchestration) toolkit. Built with OpenCV. No cloud. No subscriptions. Just cameras.</sub>

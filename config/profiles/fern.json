@@ -1,0 +1,34 @@
+{
+  "profile_name":    "fern",
+  "profile_version": "1.0",
+  "description":     "FERN v2 dataset recording — 8 gestures, 2 rounds, 7 reps, multi-camera",
+
+  "defaults": {
+    "cameras":       "phone1,phone2,phone3",
+    "sync_delay":    1.0,
+    "fps":           30,
+    "reps":          7
+  },
+
+  "export": {
+    "fern_root":              "C:/fern/FERN_V2",
+    "fern_venv":              "C:/fern/FERN_V2/venv/Scripts/python.exe",
+    "auto_extract_skeletons": true,
+    "label_subdir":           "data/labels",
+    "skeleton_subdir":        "data/skeletons",
+    "video_subdir":           "data/raw"
+  },
+
+  "inference": {
+    "sync_offset_sec": 4.0,
+    "enabled":         false
+  },
+
+  "camera_id_map": {
+    "phone1": 0,
+    "phone2": 1,
+    "phone3": 2,
+    "phone4": 3,
+    "phone5": 4
+  }
+}
