@@ -17,52 +17,46 @@ webrtcIPsFromInterfaces: yes
 api: yes
 apiAddress: :9997
 
+# --- BEGIN GENERATED PATHS ---
 paths:
-  # DroidCam phone streams — replace IPs with your phone IPs
   phone1:
-    source: http://192.168.137.101:4747/mjpegfeed?1280x720
+    source: http://192.168.137.107:4747/mjpegfeed?1280x720
     sourceOnDemand: no
     record: yes
     recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
     recordFormat: mp4
     recordPartDuration: 5m
     recordDeleteAfter: 0
-
   phone2:
-    source: http://192.168.137.102:4747/mjpegfeed?1280x720
+    source: http://192.168.137.226:4747/mjpegfeed?1280x720
     sourceOnDemand: no
     record: yes
     recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
     recordFormat: mp4
     recordPartDuration: 5m
-
+    recordDeleteAfter: 0
   phone3:
-    source: http://192.168.137.103:4747/mjpegfeed?1280x720
+    source: http://192.168.137.39:4747/mjpegfeed?1280x720
     sourceOnDemand: no
     record: yes
     recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
     recordFormat: mp4
     recordPartDuration: 5m
-
+    recordDeleteAfter: 0
   phone4:
-    source: http://192.168.137.104:4747/mjpegfeed?1280x720
+    source: http://192.168.137.35:4747/mjpegfeed?1280x720
     sourceOnDemand: no
     record: yes
     recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
     recordFormat: mp4
     recordPartDuration: 5m
-
+    recordDeleteAfter: 0
   phone5:
-    source: http://192.168.137.105:4747/mjpegfeed?1280x720
+    source: http://192.168.137.49:4747/mjpegfeed?1280x720
     sourceOnDemand: no
     record: yes
     recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
     recordFormat: mp4
     recordPartDuration: 5m
-
-  # ONVIF / RTSP IP cameras can be added here natively
-  # ipcam-1:
-  #   source: rtsp://admin:password@192.168.1.200:554/stream1
-  #   sourceOnDemand: no
-  #   record: yes
-  #   recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+    recordDeleteAfter: 0
+# --- END GENERATED PATHS ---

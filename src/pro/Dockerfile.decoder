@@ -1,0 +1,16 @@
+# ── DroidGrid VNF-Decoder ─────────────────────────────────────────────────
+# Python + ONNX Runtime + MediaPipe inference container.
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 libgl1 ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY src/addons/fern-inference/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/addons/fern-inference/inference.py ./inference.py
+
+CMD ["python", "inference.py", "--help"]
