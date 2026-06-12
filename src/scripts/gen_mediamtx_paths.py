@@ -6,7 +6,7 @@ Usage: python scripts/gen_mediamtx_paths.py [--check]
 """
 import json, re, sys, os
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CAMERAS = os.path.join(ROOT, "config", "cameras.json")
 MEDIAMTX = os.path.join(ROOT, "mediamtx.yml")
 

@@ -12,7 +12,6 @@ RUN mkdir -p dist && npx tsc server.ts \
     --target ES2022 \
     --esModuleInterop \
     --skipLibCheck \
-    --allowImportingTsExtensions \
     --noEmit false
 
 # ---- Vite UI Build ----
