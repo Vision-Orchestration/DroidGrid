@@ -8,9 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY addons/fern-inference/requirements.txt ./requirements.txt
+COPY src/addons/fern-inference/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY addons/fern-inference/inference.py ./inference.py
+COPY src/addons/fern-inference/inference.py ./inference.py
 
 CMD ["python", "inference.py", "--help"]

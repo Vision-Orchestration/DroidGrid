@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 CONVERT = (
-    Path(__file__).parent.parent
+    Path(__file__).resolve().parent.parent.parent
+    / "src"
     / "addons"
     / "gridflow-bridge"
     / "scripts"

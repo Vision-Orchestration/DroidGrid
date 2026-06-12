@@ -27,7 +27,7 @@ services:
   vnf-decoder:
     build:
       context: .
-      dockerfile: DroidGrid Pro/Dockerfile.decoder
+      dockerfile: src/pro/Dockerfile.decoder
     container_name: droidgrid-decoder
     network_mode: host
     volumes:
@@ -58,7 +58,7 @@ services:
   # VNF-3: API / Control Plane
   vnf-api:
     build:
-      context: ./DroidGrid Pro
+      context: ./src/pro
       dockerfile: Dockerfile.api
     container_name: droidgrid-api
     ports: ["3000:3000"]
@@ -86,7 +86,7 @@ services:
   # VNF-4: Web UI
   vnf-ui:
     build:
-      context: ./DroidGrid Pro
+      context: ./src/pro
       dockerfile: Dockerfile.ui
     container_name: droidgrid-ui
     ports: ["80:80"]

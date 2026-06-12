@@ -914,6 +914,8 @@ class RecordingAssistant:
 
     def _run_fern_export(self, mediamtx_files: dict, fps_map: dict, saved_paths: list):
         """Run the post-recording FERN export pipeline."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         from scripts.fern_export import export_to_fern
 
         fern_root = self.args.fern_export_dir

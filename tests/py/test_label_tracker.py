@@ -1,6 +1,9 @@
 import json
 import pytest
-from recording_assistant import LabelTracker
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+from recording.recording_assistant import LabelTracker
 
 NOMINAL_FPS = 30
 
