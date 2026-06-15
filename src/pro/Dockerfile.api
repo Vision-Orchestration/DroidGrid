@@ -1,40 +1,25 @@
-# ---- Builder ----
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
-# Compile server.ts for Node target (separate from Vite UI build)
-RUN mkdir -p dist && npx tsc server.ts \
-    --outDir dist \
-    --module NodeNext \
-    --moduleResolution NodeNext \
+RUN npm run build
+# Compile server separately
+RUN npx tsc --outDir dist-server \
+    --moduleResolution bundler \
+    --module ESNext \
     --target ES2022 \
-    --esModuleInterop \
     --skipLibCheck \
-    --noEmit false
+    server.ts
 
-# ---- Vite UI Build ----
-FROM node:20-alpine AS ui-builder
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npx vite build
-
-# ---- Runtime ----
 FROM node:20-alpine
 WORKDIR /app
-ENV NODE_ENV=production
-
 COPY --from=builder /app/dist ./dist
-COPY --from=ui-builder /app/dist ./dist-ui
-COPY --from=builder /app/package*.json ./
-RUN npm ci --omit=dev
-
+COPY --from=builder /app/dist-server ./
+COPY --from=builder /app/node_modules ./node_modules
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD wget -qO- http://localhost:3000/api/health || exit 1
 
-CMD ["node", "dist/server.js"]
+CMD ["node", "server.js"]

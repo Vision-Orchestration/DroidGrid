@@ -189,15 +189,15 @@ async function startServer() {
   const PORT = 3000;
   app.use(express.json());
 
-  // ── Auth ───────────────────────────────────────────────────────────────
-  app.post("/api/auth/login", loginHandler);
-  app.use(authMiddleware);
-
-  // M1: Rate limiting on API routes (60 req/min per IP)
+  // M1: Rate limiting on API routes (60 req/min per IP) — before auth so login is also rate-limited
   app.use("/api", (req, res, next) => {
     if (rateLimit(req as any, res as any)) return;
     next();
   });
+
+  // ── Auth ───────────────────────────────────────────────────────────────
+  app.post("/api/auth/login", loginHandler);
+  app.use(authMiddleware);
 
   app.get("/api/health", (_req,res) => res.json({
     status:"ok", version:"2.4.0-pro", uptime:process.uptime(),
