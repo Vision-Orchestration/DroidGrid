@@ -3,14 +3,15 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
+RUN npm install --force
 RUN npm run build
-# Compile server separately
+# Compile server + all server modules
 RUN npx tsc --outDir dist-server \
     --moduleResolution bundler \
     --module ESNext \
     --target ES2022 \
     --skipLibCheck \
-    server.ts
+    server.ts src-server/*.ts
 
 FROM node:20-alpine
 WORKDIR /app

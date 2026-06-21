@@ -24,39 +24,39 @@ paths:
     sourceOnDemand: no
     record: yes
     recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
-    recordFormat: mp4
-    recordPartDuration: 5m
-    recordDeleteAfter: 0
+    recordFormat: fmp4
+    recordPartDuration: "5m"
+    recordDeleteAfter: "0"
   phone2:
     source: http://192.168.137.226:4747/mjpegfeed?1280x720
     sourceOnDemand: no
     record: yes
     recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
-    recordFormat: mp4
-    recordPartDuration: 5m
-    recordDeleteAfter: 0
+    recordFormat: fmp4
+    recordPartDuration: "5m"
+    recordDeleteAfter: "0"
   phone3:
     source: http://192.168.137.39:4747/mjpegfeed?1280x720
     sourceOnDemand: no
     record: yes
     recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
-    recordFormat: mp4
-    recordPartDuration: 5m
-    recordDeleteAfter: 0
+    recordFormat: fmp4
+    recordPartDuration: "5m"
+    recordDeleteAfter: "0"
   phone4:
     source: http://192.168.137.35:4747/mjpegfeed?1280x720
     sourceOnDemand: no
     record: yes
     recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
-    recordFormat: mp4
-    recordPartDuration: 5m
-    recordDeleteAfter: 0
+    recordFormat: fmp4
+    recordPartDuration: "5m"
+    recordDeleteAfter: "0"
   phone5:
     source: http://192.168.137.49:4747/mjpegfeed?1280x720
     sourceOnDemand: no
     record: yes
     recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
-    recordFormat: mp4
-    recordPartDuration: 5m
-    recordDeleteAfter: 0
+    recordFormat: fmp4
+    recordPartDuration: "5m"
+    recordDeleteAfter: "0"
 # --- END GENERATED PATHS ---

@@ -67,11 +67,15 @@ def run(args):
     )
     detector = mp_vision.PoseLandmarker.create_from_options(options)
 
-    cap = cv2.VideoCapture(args.rtsp_url, cv2.CAP_FFMPEG)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    if not cap.isOpened():
-        print(json.dumps({"event": "error", "message": f"cannot open {args.rtsp_url}"}), flush=True)
-        sys.exit(1)
+    cap = None
+    while cap is None or not cap.isOpened():
+        if cap is not None:
+            cap.release()
+        cap = cv2.VideoCapture(args.rtsp_url, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if not cap.isOpened():
+            print(json.dumps({"event": "error", "message": f"cannot open {args.rtsp_url}, retrying in 5s"}), flush=True)
+            time.sleep(5)
 
     frame_buf = collections.deque(maxlen=args.window_size)
     vote_buf  = collections.deque(maxlen=args.smoothing_n)

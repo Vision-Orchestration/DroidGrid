@@ -12,12 +12,6 @@ services:
       - ./mediamtx.yml:/mediamtx.yml:ro
       - ./recordings:/recordings
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9997/v3/paths/list"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
     deploy:
       resources:
         limits:   { cpus: "1.0",  memory: "256M" }
@@ -46,10 +40,9 @@ services:
         --window_size  60
         --confidence   0.6
         --sync_offset_sec 4.0
-    restart: on-failure
     depends_on:
-      vnf-ingest:
-        condition: service_healthy
+      - vnf-ingest
+    restart: on-failure
     deploy:
       resources:
         limits:   { cpus: "4.0",  memory: "3G" }
@@ -71,10 +64,9 @@ services:
       - NODE_ENV=production
     restart: unless-stopped
     depends_on:
-      vnf-ingest:
-        condition: service_healthy
+      - vnf-ingest
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
       interval: 15s
       timeout: 5s
       retries: 3
